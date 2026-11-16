@@ -9,6 +9,7 @@ add_library(search_core STATIC
   src/tokenizer.cpp
   src/inverted_index.cpp
   src/snippet.cpp
+  src/index_builder.cpp
 )
 target_include_directories(search_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(search_core PUBLIC cxx_std_20)
@@ -16,6 +17,11 @@ target_link_libraries(search_core PUBLIC Threads::Threads)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(search_core PRIVATE -Wall -Wextra -Wpedantic)
 endif()
+
+# Optional performance sanity tool (not part of `all`):
+#   cmake --build build --target index_bench
+add_executable(index_bench EXCLUDE_FROM_ALL tools/index_bench.cpp)
+target_link_libraries(index_bench PRIVATE search_core)
 
 # ---------------------------------------------------------------------------
 # search_server executable — ADDED BY THE backend-api AGENT HERE.
@@ -44,6 +50,8 @@ if(BUILD_TESTING)
     tests/tokenizer_test.cpp
     tests/inverted_index_test.cpp
     tests/snippet_test.cpp
+    tests/index_builder_test.cpp
+    tests/concurrency_test.cpp
   )
   target_link_libraries(core_tests PRIVATE search_core GTest::gtest_main)
 
