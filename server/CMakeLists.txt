@@ -6,6 +6,9 @@ find_package(Threads REQUIRED)
 
 add_library(search_core STATIC
   src/custom_thread_pool.cpp
+  src/tokenizer.cpp
+  src/inverted_index.cpp
+  src/snippet.cpp
 )
 target_include_directories(search_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(search_core PUBLIC cxx_std_20)
@@ -38,6 +41,9 @@ if(BUILD_TESTING)
 
   add_executable(core_tests
     tests/thread_pool_test.cpp
+    tests/tokenizer_test.cpp
+    tests/inverted_index_test.cpp
+    tests/snippet_test.cpp
   )
   target_link_libraries(core_tests PRIVATE search_core GTest::gtest_main)
 
