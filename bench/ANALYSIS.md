@@ -8,7 +8,8 @@ student after the local run, together with the hardware description.
 ## 1. What is being measured
 
 `POST /api/index {threads: p}` rebuilds the whole index from scratch (API.md 7.4).
-The coordinating (HTTP request) thread walks the directory tree and enqueues one
+The coordinating thread (the HTTP I/O thread that runs the `POST /api/index`
+handler and holds its connection for the whole build) walks the directory tree and enqueues one
 task per document into a fresh `CustomThreadPool` with `p` workers. A worker reads
 the file, tokenises it, counts terms in a thread-local map without holding any
 lock, and then merges the counts into the shared `InvertedIndex`. The index has 64
@@ -16,11 +17,22 @@ shards, each with its own `std::shared_mutex`; a worker locks one shard at a tim
 appends the postings, and unlocks. `time_ms` covers traversal, reading,
 tokenisation, merging, pool shutdown and finalisation (document frequencies).
 
-Search (`POST /api/search`) is served by the HTTP server's worker threads
-(`max(16, 2 x cores)`). A request tokenises the query, optionally calls Ollama
-(blocking, inside the request), takes shared locks on the shards of the query terms,
-scores the postings, and reads the top documents from disk to cut snippets. The
-WebSocket path runs queries on our own thread pool but shares the same index.
+Search (`POST /api/search`) runs on the HTTP server's I/O threads
+(`max(16, 2 x cores)`); each TCP connection is bound to one of them for its whole
+life, and the handler runs on the thread of its connection. A request tokenises the
+query, optionally calls Ollama (blocking that thread; at most 8 expansion calls run
+at once across REST and WebSocket, the others fall back at once, API.md 5.4), takes
+shared locks on the shards of the query terms, scores the postings, and reads the
+top documents from disk to cut snippets (the file is read in chunks and reading
+stops once the snippet window is complete; a file without a match is read to the
+end). The WebSocket path runs queries on our own thread pool (not on the I/O
+threads) but shares the same index.
+
+Known limitation L1 (API.md 2.5): a request whose connection is bound to an I/O
+thread that is busy with an expansion call or an index build waits until that
+operation ends. Keep this in mind when you read latency outliers: a single very
+slow health, stats or search request, while the median is normal, can be this
+effect and not a sign of server saturation.
 
 ## 2. Index build: speedup and efficiency
 
@@ -64,7 +76,7 @@ Candidate causes in this implementation, with the evidence to look for in
    up only as a late rise of e(p) at the highest thread counts. The posting
    slabs are per shard, so there is also no global allocator lock for postings;
    temporary strings and per-thread maps still go through the C++ allocator,
-   whose arena behaviour (glibc malloc arenas, musl in a slim image) can limit
+   whose arena behaviour (glibc malloc arenas) can limit
    scaling and is worth testing (section 5).
 5. **Hyper-threading and oversubscription.** Logical cores share execution
    units. Expect near-linear speedup up to the physical core count, a smaller
@@ -99,15 +111,21 @@ saturation point. What sets the ceiling:
    generator takes cores too; `loadgen_ceiling.csv` and `client_cpu_pct` show
    how much.
 2. **Snippet file reads.** Every returned result costs one file open, read and
-   UTF-8/whitespace processing at query time (limit results per request). This
+   UTF-8/whitespace processing at query time (limit results per request). The
+   reading is incremental and stops once the snippet is complete, so a document
+   with an early match costs only its first chunk(s) of 16 KiB; a document without
+   a match is read to the end. This
    is I/O and syscall-heavy; it is a likely dominant per-request cost for
    keyword search. Evidence: `mean_server_time_ms` is much higher than a pure
    index lookup would need, and throughput rises when `limit` is small. A
    snippet cache or storing snippets at build time would remove it.
-3. **HTTP worker count.** The server uses `max(16, 2 x cores)` worker threads. When
-   the number of clients exceeds the worker count, additional clients only queue,
-   so throughput must stay flat and p95 grows; if throughput stays flat already
-   below that point the limit is CPU or I/O, not the worker count.
+3. **HTTP I/O thread count.** The server uses `max(16, 2 x cores)` I/O threads and
+   binds each connection to one of them. The load generator keeps one connection
+   per client, so with more clients than I/O threads some threads serve several
+   connections one request at a time; throughput should then stay flat and p95
+   grow. If throughput stays flat already below that point the limit is CPU or
+   I/O, not the thread count. The binding is chosen by the library, so the
+   connections are not guaranteed to be spread evenly.
 4. **Lock contention on shards.** Searches take shared (reader) locks, which
    do not exclude each other, so readers should scale; the contended case is
    a search that runs while an index build is merging (not the case in this
@@ -124,9 +142,13 @@ large. A single Ollama instance generates one request at a time per model slot
 (by default it processes few requests in parallel and queues the rest), so
 throughput with expansion does not grow with the number of clients beyond the
 Ollama parallelism; instead p50 grows roughly linearly with clients (queueing).
-Also, a request in the HTTP worker blocks its thread for the whole call, so with
-many clients the worker pool can be exhausted by waiting requests, which would
-also delay keyword-only requests sent at the same time. Expansion calls that hit
+Also, a request blocks its I/O thread for the whole call. At most 8 expansion calls
+run at once (REST and WebSocket together); a ninth query does not wait and is
+answered with `expansion: "fallback"`, so with many clients part of the
+requests of the LLM run can show `fallback` because of this limit and not because
+of Ollama (compare the `llm` and `fallback` counts with the client count).
+Keyword-only requests on connections bound to other I/O threads are not delayed;
+requests on a connection bound to a blocked thread wait (limitation L1). Expansion calls that hit
 the timeout (`OLLAMA_TIMEOUT_MS`) end as `expansion: "fallback"`; the run
 labels (`llm` vs `fallback` counts) show whether the LLM was really in the path.
 On a laptop without GPU a 1B-parameter model also competes with the server for
@@ -150,7 +172,8 @@ CPU-bound on the same cores as the server.
 | Health-check req/s much higher than search req/s | client is not the bottleneck |
 | `mean_server_time_ms` close to p50 | time is spent in the server, not in network or queue |
 | p50 far above `mean_server_time_ms` | queueing before the handler (worker count) |
-| With expansion: `expansion_llm` low, `fallback` high | Ollama not ready or too slow: result describes timeouts |
+| With expansion: `expansion_llm` low, `fallback` high | Ollama not ready or too slow, or more than 8 concurrent expansions (the limit sheds the rest): result describes timeouts or the limit |
+| A few very slow requests, normal median (health, stats or search) | limitation L1: the connection is bound to an I/O thread busy with an expansion call or a build |
 
 ## 5. Improvement ideas
 
@@ -180,6 +203,12 @@ Search:
   skip the LLM; use a shorter timeout, a smaller model, or run expansion
   asynchronously (WebSocket already streams `query_expansion` before the keyword
   results).
-- Run Ollama with `OLLAMA_NUM_PARALLEL` > 1 or a GPU; separate the HTTP workers
-  that wait for the LLM from those that serve keyword requests, so slow
-  expansions cannot starve cheap searches.
+- Run Ollama with `OLLAMA_NUM_PARALLEL` > 1 or a GPU.
+- Separate the threads that wait for the LLM (and for builds) from those that
+  serve cheap requests. Running `POST /api/search` and `POST /api/index` on a
+  separate request pool and completing the response later was implemented and
+  measured during development and not adopted: with Crow it needed access to a
+  private member of the library to avoid a use-after-free, and keyword-only
+  throughput fell by about 14% on a 2-core machine (see the explanatory note,
+  section 4.7, and `docs/prompts.md`, entry 16). Doing it properly needs an HTTP
+  library with first-class asynchronous responses.

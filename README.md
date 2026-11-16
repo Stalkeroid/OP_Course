@@ -44,12 +44,13 @@ Inside `search_server`:
 
 | Component | Role |
 |---|---|
-| `ApiServer` | HTTP routes, static files, `/ws/search` (Crow, `max(16, 2 x cores)` worker threads) |
-| `SearchPipelineService` | index lifecycle (atomic snapshot swap), expansion -> search pipeline, per-connection WebSocket queue |
+| `ApiServer` | HTTP routes, static files, `/ws/search` (Crow, `max(16, 2 x cores)` I/O threads; each connection is bound to one of them and REST handlers, including `POST /api/search` and `POST /api/index`, run on it) |
+| `SearchPipelineService` | index lifecycle (atomic snapshot swap; the old index is released after the swap, outside the mutex), expansion -> search pipeline, at most 8 concurrent Ollama expansion calls (`kMaxConcurrentExpansions`, REST and WebSocket together; the 9th query falls back at once), per-connection WebSocket queue drained by its own `CustomThreadPool` |
 | `IndexBuilder` | walks the dataset, one task per document in a fresh `CustomThreadPool` |
 | `CustomThreadPool` | own fixed-size worker pool (mutex + condition variables) |
-| `InvertedIndex` | own concurrent index: 64 shards, each with its own `std::shared_mutex` |
-| `OllamaClient` | `POST /api/generate` for expansion, cached `GET /api/tags` for health |
+| `InvertedIndex` | own concurrent index: 64 shards, each with its own `std::shared_mutex`; posting slabs are mapped with `mmap` and returned with `munmap` (`memory_release.h`) |
+| snippets (`makeSnippetFromFile`) | streaming extraction: the file is read in 16 KiB chunks and reading stops once the snippet window is complete; a file without any match is read to the end |
+| `OllamaClient` | `POST /api/generate` for expansion; `GET /api/tags` for health, cached for 5 s, only one check runs at a time (other health requests answer with the last known value) |
 
 Compose services: `server`, `ollama`, `ollama-init` (one-shot), `dataset-init`
 (one-shot), and the optional `bench` (profile `bench`).
@@ -65,7 +66,8 @@ Compose services: `server`, `ollama`, `ollama-init` (one-shot), `dataset-init`
 - RAM: with the full dataset the server holds about 390 MB after an index build
   and peaks at about 770 MB during a rebuild, because the old and the new index
   live side by side until the swap (measured on a 2-core Linux machine over 25
-  consecutive rebuilds with 1-16 threads). The Ollama model needs additional
+  consecutive rebuilds with 1-16 threads; the figures and the method are in the
+  header comment of `server/include/search/memory_release.h`). The Ollama model needs additional
   memory (CPU inference, no GPU is passed into the container).
 
 ## Quick start
@@ -127,6 +129,21 @@ curl -s -X POST http://localhost:8080/api/search -H 'Content-Type: application/j
 ```
 
 Or open <http://localhost:8080>, press **Build index**, then search.
+
+## Known limitations
+
+Details and measurements: [`docs/API.md`](docs/API.md) section 2.5.
+
+- A `POST /api/search` that calls Ollama holds its HTTP I/O thread for up to
+  `OLLAMA_TIMEOUT_MS`, and `POST /api/index` holds one for the whole build (at most 8
+  and 1 at a time).
+- L1: a connection that the HTTP library binds to such an occupied I/O thread waits
+  until that operation ends, so one `GET /api/health` or `GET /api/stats` can be slow
+  (up to 15 s by default, or the build duration), while the others answer in
+  milliseconds. A client that polls health should use a timeout and retry on a new
+  connection.
+- L2: the same wait applies to any other request or WebSocket connection on that
+  I/O thread. `HEAD` requests are not supported (outside the contract).
 
 ## Dataset
 
@@ -381,8 +398,8 @@ ctest --test-dir build --output-on-failure
 
 Targets: `search_core` (static library: thread pool, tokenizer, index, snippets,
 builder), `search_service` (static library: HTTP/WS/Ollama layer), `search_server`,
-`search_cli`, and the test executables `core_tests` and `service_tests`
-(GoogleTest). `index_bench` (not built by default) prints build time, peak RSS and
+`search_cli`, and the test executables `core_tests` (55 tests) and `service_tests`
+(79 tests) (GoogleTest; counts from `--gtest_list_tests`). `index_bench` (not built by default) prints build time, peak RSS and
 search latency for a directory:
 `cmake --build build --target index_bench && build/server/index_bench DIR THREADS [query ...]`.
 
@@ -428,6 +445,8 @@ charts to `bench/charts/` (`index_time_vs_threads.png`, `speedup_efficiency.png`
 `throughput_vs_clients.png`, `latency_vs_clients.png`). The first index build after
 the stack starts can be slower because the dataset files are not yet in the page
 cache; the benchmark therefore does one untimed warm-up build before the timed ones.
+The `bench` service mounts `./bench` and, read-only, `./dataset/vocab` (the query words
+are drawn from the generator vocabulary).
 Options, a host-Python variant and method notes: [`bench/README.md`](bench/README.md);
 bottleneck discussion: [`bench/ANALYSIS.md`](bench/ANALYSIS.md).
 
@@ -463,6 +482,9 @@ docs/assignment/          the task description (PDF)
 - **`503 index_not_built`.** No index has been built since the server started. Call
   `POST /api/index` (or `./search --index 4`). The index lives in memory, so it must
   be rebuilt after every server restart.
+- **One `GET /api/health` is slow while searches or a build run.** Known limitation
+  L1 (see above): that connection is bound to an I/O thread that is waiting for
+  Ollama or for the build. Retry on a new connection.
 - **Port 8080 is busy.** Choose another host port: `PORT=8081 docker compose up`
   (host and container use the same number); use `./search --port 8081 ...` outside
   the container or the Web UI at the new port.

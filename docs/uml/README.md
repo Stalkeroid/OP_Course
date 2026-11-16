@@ -81,7 +81,9 @@ classDiagram
     -shared_ptr~const InvertedIndex~ servedIndex_
     -atomic~bool~ building_
     -atomic~bool~ stopping_
+    -atomic~int~ expansionsInFlight_
     -CustomThreadPool webSocketPool_
+    +kMaxConcurrentExpansions = 8$
     +buildIndex(threads) BuildResult
     +performKeywordSearch(request) SearchResponse_or_ApiError
     +performStreamingSearch(request, sink) void
@@ -106,9 +108,14 @@ classDiagram
     -string model_
     -int timeoutMs_
     -mutex healthMutex_
+    -bool probing_
+    -bool hasHealth_
     -bool healthValue_
+    +kHealthCacheTtl = 5 s$
+    +kHealthTimeoutMs = 2000$
     +expandQuery(originalQuery) optional~vector~string~~
     +checkHealth() bool
+    -probeHealth() bool
     +buildPrompt(query)$ string
     +buildGenerateRequestBody(model, query)$ string
     +parseGenerateResponse(body)$ optional~vector~string~~
@@ -148,6 +155,18 @@ classDiagram
     +documentFrequency(term) uint64
     +finalize() void
     +setBuildInfo(buildTimeMs, threadsUsed, filesSkipped) void
+  }
+
+  class PostingArena {
+    +allocateChunk(capacity) uint32
+    -SlabDeleter slabDeleter
+  }
+
+  class memory_release {
+    <<file memory_release.h>>
+    +allocatePages(bytes) void*
+    +freePages(address, bytes) void
+    +releaseFreeHeapMemory() void
   }
 
   class Shard {
@@ -217,6 +236,10 @@ classDiagram
   BuildOutcome o-- InvertedIndex
   BuildOutcome *-- IndexStats
   InvertedIndex *-- Shard : 64
+  Shard *-- PostingArena : arena
+  PostingArena ..> memory_release : slabs via mmap / munmap
+  InvertedIndex ..> memory_release : HeapTrimGuard trims in destructor
+  IndexBuilder ..> memory_release : releaseFreeHeapMemory after build
   InvertedIndex ..> SearchOutput
   InvertedIndex ..> WeightedTerm
   InvertedIndex ..> IndexStats
@@ -225,10 +248,14 @@ classDiagram
 
 Helper functions that are not classes: tokenizer (`forEachToken`, `tokenize`,
 `buildQueryTerms`, `originalQueryTokens`, `isStopWord`), snippets (`makeSnippet`,
-`makeSnippetFromFile`), request parsing (`parseIndexRequest`, `parseSearchRequest`,
+`makeSnippetFromFile`; the streaming state machine `SnippetScanner` and the
+`TermSet` lookup are private to `snippet.cpp`, in an anonymous namespace, so they are
+not drawn), request parsing (`parseIndexRequest`, `parseSearchRequest`,
 `restErrorJson`, `webSocketErrorJson`), configuration (`loadConfig`,
 `defaultWorkerThreads`). Other DTOs in `search_pipeline_service.h`: `BuildResult`,
 `ServiceStatus`, `ExpansionStage`, `SearchStage`, `SearchResponse`, `PipelineOptions`.
+`ExpansionSlot` (anonymous namespace in `search_pipeline_service.cpp`) is the RAII holder
+of one expansion slot; it never waits.
 
 ### 2.3 PNG diagram vs code
 
@@ -242,18 +269,20 @@ Differences the student should apply when redrawing the PNG:
 | Request/error types | absent | `SearchRequest`, `IndexRequest`, `ApiError` (`request_validation.h`); `WeightedTerm` (`tokenizer.h`); `SearchOutput`, `BuildResult`, `ServiceStatus`, `ExpansionStage`, `SearchStage`, `SearchResponse` |
 | `ApiServer` fields | `searchService`, `port` | `service_` (shared_ptr), `config_` (port lives in `Config`), pimpl `impl_` (Crow app, session table) |
 | `ApiServer` methods | `handleHealthCheck(request, response)`, `handleIndexPost(request, response)`, `handleSearchPost(request, response)`, `handleWebSocket(wsConnection)` | handlers take the body string and return `HttpReply` (no socket types, unit-testable): `handleHealthCheck()`, `handleIndexPost(body)`, `handleSearchPost(body)`, `handleStats()`; added `handleRequest`, `handleStatic`, `run`, `stop`. `handleWebSocket()` has no argument: it registers the `/ws/search` route with open/message/close callbacks |
-| `SearchPipelineService` fields | `invertedIndex`, `threadPool`, `ollamaClient` | `servedIndex_` is a `shared_ptr<const InvertedIndex>` swapped under `indexMutex_` (not owned for life); `ollama_`; `builder_`; `webSocketPool_` is the pool for WebSocket queries only; `building_`, `stopping_`, `config_` |
+| `SearchPipelineService` fields | `invertedIndex`, `threadPool`, `ollamaClient` | `servedIndex_` is a `shared_ptr<const InvertedIndex>` swapped under `indexMutex_` (not owned for life); `ollama_`; `builder_`; `webSocketPool_` is the pool for WebSocket queries only; `building_`, `stopping_`, `config_`; `expansionsInFlight_` with the constant `kMaxConcurrentExpansions = 8` (load shedding of Ollama calls) |
 | `buildIndex` | `buildIndex(datasetPath, threads): IndexStats` | `buildIndex(int threads): BuildResult`; the dataset path comes from `Config`; error 409/500 is returned in `BuildResult::error` |
 | `performKeywordSearch` | `(query: String): List<SearchResult>` | `(const SearchRequest&): variant<SearchResponse, ApiError>`; `SearchResponse` holds the expansion stage and the search stage |
 | `performStreamingSearch` | `(query, wsClient: WebSocket): void` | `(const SearchRequest&, const MessageSink&): void`; a `MessageSink` is a function that sends one text frame and returns false when the connection is gone. WebSocket frames enter through `handleWebSocketMessage(session, payload, isBinary)` |
 | Pool ownership | `SearchPipelineService` composes `CustomThreadPool` | the service owns a pool only for WebSocket queries; index builds create their own pool inside `IndexBuilder::buildIndex` |
-| `OllamaClient` fields | `baseUrl`, `httpClient` | `baseUrl_`, `model_`, `timeoutMs_`, health cache (`healthMutex_`, `hasHealth_`, `healthValue_`, `healthAt_`); no stored client: a `httplib::Client` is created per call |
-| `OllamaClient` methods | `expandQuery(originalQuery): List<String>`, `checkHealth(): boolean` | `expandQuery` returns `optional<vector<string>>` (`nullopt` = failure -> fallback); `checkHealth` caches for 5 s; added static helpers `buildPrompt`, `buildGenerateRequestBody`, `parseGenerateResponse`, `tagsContainModel` |
+| `OllamaClient` fields | `baseUrl`, `httpClient` | `baseUrl_`, `model_`, `timeoutMs_`, health cache (`healthMutex_`, `probing_`, `hasHealth_`, `healthValue_`, `healthAt_`); no stored client: a `httplib::Client` is created per call |
+| `OllamaClient` methods | `expandQuery(originalQuery): List<String>`, `checkHealth(): boolean` | `expandQuery` returns `optional<vector<string>>` (`nullopt` = failure -> fallback); `checkHealth` caches for 5 s and lets only one probe run at a time (`probing_`; other callers get the last known value); added static helpers `buildPrompt`, `buildGenerateRequestBody`, `parseGenerateResponse`, `tagsContainModel` |
 | `CustomThreadPool` | `workers`, `taskQueue`, `queueMutex`, `conditionVar`, `isRunning`; `enqueueTask`, `shutdown` | same plus `doneCondition`, `pendingTasks`, `firstError`; added `waitAll()` and `size()`; `shutdown()` drains the queue; a task exception is stored and rethrown by `waitAll()`. `enqueueTask(Task)` with `Task = std::function<void()>` |
 | `InvertedIndex` fields | `indexMap: Dictionary<String, List<DocumentEntry>>`, `rwLock`, `documentCount` | `shards` = 64 x `Shard` (each has its own `rwLock` and `indexMap`, postings are `{doc, count}` in a per-shard arena); `docIds` + `docTableLock`; `documentCount` is atomic; build info atomics, `finalized` |
 | `InvertedIndex` methods | `addDocument(docId, text)`, `search(keywords: List<String>): List<SearchResult>`, `getStats()` | `search(const vector<WeightedTerm>&, limit): SearchOutput` (weights 1.0 original / 0.5 expansion, `totalMatches`); added `documentFrequency`, `finalize`, `setBuildInfo`, `getDocumentCount` |
 | `SearchResult.score` | `float` | `double` (rounded to 6 decimals, clamped to [0.000001, 1.0]) |
 | `IndexStats` | `documents`, `indexBuildTimeMs`, `threadsUsed` (int) | `documents` (uint64), `indexBuildTimeMs` (int64), `threadsUsed` (int) plus extra `uniqueTerms`, `filesSkipped`, `indexReady`, `indexing` |
+| Memory release | absent | free functions in `memory_release.h`: `allocatePages` / `freePages` (posting slabs via `mmap` / `munmap`) and `releaseFreeHeapMemory` (`malloc_trim`); called from `InvertedIndex` (`HeapTrimGuard`, slab deleter) and `IndexBuilder::buildIndex` |
+| Snippets | absent | free functions `makeSnippet`, `makeSnippetFromFile` (`snippet.h`); the file is read in 16 KiB chunks and reading stops when the snippet is complete |
 | Relations | `SearchPipelineService` composes `InvertedIndex`, `OllamaClient` | the service holds `OllamaClient` by shared pointer (injectable for tests) and the index as a swapped snapshot; `IndexBuilder` creates the index |
 
 ## 3. Deployment diagram
@@ -331,13 +360,19 @@ The PNG shows the logical flow. Where the code adds detail (all in
   session queue and makes sure one drain task is scheduled on `webSocketPool_`.
   Queries of one connection are therefore processed in order and never interleaved;
   different connections run in parallel.
-- `processFrame` parses and validates the frame; an invalid frame produces a single
-  `error` message. A valid one goes to `performStreamingSearch(request, sink)`.
+- Fast error path: if the session is idle (no query running or queued) and the frame
+  is invalid (binary frame, bad JSON, bad fields), `handleWebSocketMessage` sends the
+  `error` message at once on the connection's I/O thread and does not queue it. In every
+  other case `processFrame` parses and validates the frame on a pool worker, so an
+  invalid frame produces a single `error` message in its FIFO position. A valid frame
+  goes to `performStreamingSearch(request, sink)`.
 - `query_expansion` is sent before the keyword search starts; `done` is the last
   message. If no index is built, a single `error` (`index_not_built`) is sent.
 - A frame above 65 536 bytes closes the connection with code 1009.
 
 ### 4.2 Keyword search (REST)
+
+The whole handler runs on the HTTP I/O thread of the connection (docs/API.md section 2.5).
 
 ```mermaid
 sequenceDiagram
@@ -364,15 +399,21 @@ sequenceDiagram
       alt expand == false or no tokens in the query
         Note over Svc: expansion = "disabled", Ollama is not called
       else expansion requested
-        Svc->>Oll: expandQuery(query)
-        Oll->>Ollama: POST /api/generate (prompt, format json, temperature 0)
-        alt Ollama answers 200 with {"terms": [...]}
-          Ollama-->>Oll: response
-          Oll-->>Svc: terms
-          Note over Svc: expansion = "llm"
-        else down, timeout, non-200, bad answer
-          Oll-->>Svc: nullopt
-          Note over Svc: expansion = "fallback" (original tokens only)
+        Svc->>Svc: ExpansionSlot: try to take one of kMaxConcurrentExpansions = 8 slots
+        alt all 8 slots taken (expansionsInFlight_ == 8)
+          Note over Svc: no waiting, Ollama is not called,<br/>expansion = "fallback" (original tokens only)
+        else slot taken
+          Svc->>Oll: expandQuery(query)
+          Oll->>Ollama: POST /api/generate (prompt, format json, temperature 0)
+          alt Ollama answers 200 with {"terms": [...]}
+            Ollama-->>Oll: response
+            Oll-->>Svc: terms
+            Note over Svc: expansion = "llm"
+          else down, timeout, non-200, bad answer
+            Oll-->>Svc: nullopt
+            Note over Svc: expansion = "fallback" (original tokens only)
+          end
+          Note over Svc: slot released when the call ends
         end
       end
       Svc->>Svc: buildQueryTerms (original 1.0, expansion 0.5)
@@ -380,6 +421,7 @@ sequenceDiagram
       Idx-->>Svc: SearchOutput (top-k, totalMatches)
       loop each returned document
         Svc->>FS: makeSnippetFromFile(DATASET_PATH/docId)
+        Note over FS: 16 KiB chunks, reading stops when the snippet window<br/>is complete (a file without a match is read to the end)
         FS-->>Svc: snippet
       end
       Svc-->>API: SearchResponse
@@ -425,6 +467,7 @@ sequenceDiagram
       end
       Bld->>Pool: waitAll() (rethrows the first task exception)
       Bld->>Pool: shutdown()
+      Bld->>Bld: releaseFreeHeapMemory() (workers have exited)
       Bld->>Idx: finalize(), setBuildInfo(timeMs, threads, filesSkipped)
       alt zero readable documents
         Bld-->>Svc: BuildError dataset_empty
@@ -432,8 +475,10 @@ sequenceDiagram
         API-->>Admin: 500 dataset_empty
       else success
         Bld-->>Svc: BuildOutcome(index, stats)
-        Svc->>Svc: servedIndex_ = new index (swap under indexMutex_)
+        Svc->>Svc: old = servedIndex_; servedIndex_ = new index (swap under indexMutex_)
         Note over Svc: searches that started earlier finish on the old index
+        Svc->>Svc: old.reset() after the mutex is released
+        Note over Svc: the last owner destroys the old index: slabs munmap-ed,<br/>HeapTrimGuard calls releaseFreeHeapMemory()
         Svc-->>API: BuildResult(stats)
         API-->>Admin: 200 {status, documents_indexed, time_ms, threads_used, files_skipped}
       end
@@ -478,7 +523,10 @@ sequenceDiagram
   Svc->>Oll: checkHealth()
   alt cached result is younger than 5 s
     Oll-->>Svc: cached value
-  else cache empty or expired
+  else another check is running (probing_ is true)
+    Oll-->>Svc: last known value (false if no check has completed yet), no waiting
+  else cache empty or expired, no check running
+    Note over Oll: probing_ = true, lock released during the probe
     Oll->>Ollama: GET /api/tags (timeout 2000 ms)
     alt 200 and the model name is listed
       Ollama-->>Oll: models[]
@@ -486,7 +534,7 @@ sequenceDiagram
     else refused, timeout, non-200 or model missing
       Oll-->>Svc: false
     end
-    Note over Oll: result stored with the current time
+    Note over Oll: probing_ = false, result stored with the current time
   end
   API->>Svc: status()
   Svc-->>API: indexReady, indexing
@@ -495,6 +543,9 @@ sequenceDiagram
 
 ## 5. Gaps
 
+- Known limitation L1 (docs/API.md section 2.5) is not drawn: a connection bound to an
+  I/O thread that is busy with an expansion call or a build waits until that operation
+  ends. All sequence diagrams of the REST routes run on that I/O thread.
 - The PNG class diagram and the PNG use case diagram are not updated; section 2.3
   lists what to change. A sequence diagram for the streaming search exists only as the
   original PNG (section 4.1 describes the code differences in text).

@@ -1576,4 +1576,68 @@ any statement you could not verify in the code; any remaining disagreement
 between code, docs/API.md and the documents.
 ```
 
-Outcome: not run to completion (stopped at the user's request to pause before it changed any file; to be rerun unchanged when work resumes)
+Outcome: accepted (first start was stopped at the user's request to pause before it changed any file; rerun unchanged after the pause)
+
+### 19. verifier — final acceptance pass
+Date: 2026-11-16
+Model: opus
+Prompt:
+
+```
+Repository under test: https://github.com/Stalkeroid/op_course, branch main
+(local checkout with the same HEAD: /home/claude/op_course — do not modify it
+or build in it). Your role file was loaded as your system prompt. English only.
+Sandbox limits as before: no Docker daemon and no image pulls (reproduce the
+Dockerfile build-stage commands natively), no real Ollama (write fakes in
+/tmp: normal; hanging only on /api/generate; hanging on every endpoint),
+2 cores, Python `websockets` installed. Work in a NEW directory /tmp/verify3
+with a fresh clone; state the HEAD you tested.
+
+This is the final pass before the student takes over. Since the last
+verification the server gained a single-flight Ollama health check, the
+contract gained section 2.5 "Request threads and known limitations" with
+conditional wording in 6.2 / 9.2 and a reworded checklist item 2a, and all
+documents were revised. Judge independently:
+
+1. Build as the Dockerfile does; all tests; both test executables under
+   -DENABLE_TSAN=ON with the ThreadSanitizer warning count.
+2. docs/API.md: read it completely for internal contradictions, then run the
+   whole conformance checklist of section 14 against the running server, every
+   item, including 2a exactly as written (it has never been executed), 22a,
+   22b, 27a, 27b, 30. Cross-check scoring and snippets against an independent
+   reference implementation of section 4 on at least 20 queries.
+3. Health behaviour of 6.2: single check (20 concurrent health requests while
+   /api/tags hangs -> how many /api/tags calls reach the fake, how long each
+   request takes), the 5 s cache, and whether known limitation L1 is described
+   accurately (reproduce it once: fake hanging on every endpoint, 16 searches,
+   24 concurrent health requests — report the distribution; this is documented
+   behaviour, not a failure, unless reality is worse than section 2.5 says).
+4. Documents vs code — README.md, docs/uml/README.md,
+   docs/report/explanatory-note.md (Ukrainian), docs/report/README.md,
+   bench/README.md, bench/ANALYSIS.md, dataset/README.md: sample at least 30
+   concrete factual claims spread over these files (constants, limits,
+   timeouts, thread counts, class/member/function names in the Mermaid
+   diagrams, file names, commands, options, env vars and defaults, test counts,
+   what each test file covers) and check each against the code or by running
+   it. Confirm that no measured benchmark result is invented: every number in
+   the note is either marked as a development-time measurement or left as a
+   «[ЗАПОВНИТИ …]» placeholder.
+5. Clients and tooling smoke test: ./search via SEARCH_CLI_LOCAL (search,
+   --index, --stats, --health, --json, exit codes), Web UI assets and
+   `node --check web/app.js`, bench in the container layout
+   (only ./bench and ./dataset/vocab mounted as in docker-compose.yml) with
+   run_all.py --quick, `docker compose config -q`.
+6. Hygiene: clang-format --dry-run -Werror, black --check, nothing generated
+   or binary tracked, executable bit on `search`. (Commit-subject style of
+   three old commits is a known open item for the repository owner — do not
+   report it again.)
+Stop every process you started, delete large temporary data. Do not edit,
+commit or push anything.
+
+REPORT BACK: summary counts (PASS / FAIL / NOT VERIFIABLE HERE); a table of
+FAILs and RISKs only (id, area, severity, what, evidence, what the fix should
+achieve); the list of wrong claims found in the documents with file and line;
+and the final list of what a human must still check on a real machine.
+```
+
+Outcome: pending
