@@ -71,10 +71,22 @@ README. Never let code drift from the document.
 - Formatting: `.clang-format` with `BasedOnStyle: Google`; all C++ is formatted
   before commit. Python helper scripts: `black`.
 - CMake option `ENABLE_TSAN` builds tests with ThreadSanitizer.
+- Naming follows the UML diagrams in `docs/uml/` (class names, camelCase methods
+  and fields such as `addDocument`, `enqueueTask`, `docId`); clang-format Google
+  style governs layout only.
+- Build layout: root `CMakeLists.txt` adds `server/` and `cli/`. Targets:
+  `search_core` (static lib), `search_server`, `search_cli`, `core_tests`.
+  One root `Dockerfile` (multi-stage); runtime image has `/app/search_server`,
+  `/app/search_cli`, `/app/web`.
+- Dataset: generated, ~2.1 GB, >= 10 000 documents (assignment says >= 2 GB).
+- User decisions on the contract (2026-11-16): no auto-index on startup (search
+  before the first build returns 503), no stemming.
 
 ## Repository layout
 
 ```
+CMakeLists.txt root build file
+Dockerfile     multi-stage image for the server and the CLI
 server/        CMakeLists.txt, include/, src/, tests/
 cli/           CLI client sources
 web/           static Web UI (served by the server)

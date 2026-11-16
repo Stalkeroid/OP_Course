@@ -19,3 +19,7 @@ Thumbs.db
 
 # Local Claude settings
 .claude/settings.local.json
+
+# Generated dataset output (never commit)
+dataset/out/
+*.pyc
