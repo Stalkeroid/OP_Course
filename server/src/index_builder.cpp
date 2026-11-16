@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "search/custom_thread_pool.h"
+#include "search/memory_release.h"
 
 namespace search {
 
@@ -111,6 +112,12 @@ BuildOutcome IndexBuilder::buildIndex(const fs::path& datasetPath,
     pool.waitAll();  // rethrows the first worker exception
     pool.shutdown();
   }
+  // The workers have exited, so their thread_local scratch (file buffer,
+  // term-count table) and the task closures are freed now. Hand those free
+  // pages, and whatever the per-thread arenas still hold, back to the OS
+  // (memory_release.h). If a task threw, the pool is destroyed first and the
+  // discarded index's destructor trims instead.
+  releaseFreeHeapMemory();
   index->finalize();
 
   const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(

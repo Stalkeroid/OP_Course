@@ -10,6 +10,7 @@ add_library(search_core STATIC
   src/inverted_index.cpp
   src/snippet.cpp
   src/index_builder.cpp
+  src/memory_release.cpp
 )
 target_include_directories(search_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(search_core PUBLIC cxx_std_20)

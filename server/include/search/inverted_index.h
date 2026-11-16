@@ -26,6 +26,10 @@
 // fragmentation), and unused space is bounded by the last chunk of each list.
 // This keeps the 2 GB / 20 000-document dataset well under 1.5 GB RSS, where
 // std::vector doubling + realloc fragmentation needed ~1.6 GB.
+// Slabs are mmap'ed pages (allocatePages) and are unmapped by the destructor;
+// the last member to be destroyed then calls malloc_trim, so a dropped index
+// gives its memory back to the OS instead of leaving it in malloc arenas
+// (see memory_release.h).
 //
 // Determinism: internal ids depend on insertion order, but scores do not
 // (each raw(d) is summed in query-term order), and ties are broken by the
@@ -155,7 +159,12 @@ class InvertedIndex {
     }
 
    private:
-    std::vector<std::unique_ptr<Posting[]>> slabs;
+    // Slab memory comes straight from the OS (mmap) and goes back on
+    // destruction (munmap), independent of malloc's arenas and thresholds.
+    struct SlabDeleter {
+      void operator()(Posting* slab) const noexcept;
+    };
+    std::vector<std::unique_ptr<Posting[], SlabDeleter>> slabs;
     std::uint32_t usedInLastSlab = kSlabSlots;
   };
 
@@ -174,6 +183,18 @@ class InvertedIndex {
                              Visitor&& visit);
 
   static std::size_t shardOf(std::size_t termHash);
+
+  // Declared FIRST so it is destroyed LAST: once the term dictionaries,
+  // doc-id strings and slabs are gone, it calls releaseFreeHeapMemory().
+  // A member (not ~InvertedIndex body) because the body runs before the
+  // members are freed. Runs in whichever thread drops the last shared_ptr.
+  struct HeapTrimGuard {
+    HeapTrimGuard() = default;
+    HeapTrimGuard(const HeapTrimGuard&) = delete;
+    HeapTrimGuard& operator=(const HeapTrimGuard&) = delete;
+    ~HeapTrimGuard();
+  };
+  HeapTrimGuard heapTrimGuard;
 
   std::array<Shard, kShardCount> shards;
 

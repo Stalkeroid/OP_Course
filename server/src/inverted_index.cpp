@@ -7,6 +7,8 @@
 #include <stdexcept>
 #include <unordered_set>
 
+#include "search/memory_release.h"
+
 namespace search {
 
 namespace {
@@ -102,6 +104,13 @@ double roundScore(double score) {
   return std::clamp(rounded, 0.000001, 1.0);
 }
 
+void InvertedIndex::PostingArena::SlabDeleter::operator()(
+    Posting* slab) const noexcept {
+  freePages(slab, sizeof(Posting) * kSlabSlots);
+}
+
+InvertedIndex::HeapTrimGuard::~HeapTrimGuard() { releaseFreeHeapMemory(); }
+
 std::uint32_t InvertedIndex::PostingArena::allocateChunk(
     std::uint32_t capacity) {
   const std::uint32_t slots = capacity + 1;  // + header slot
@@ -109,7 +118,10 @@ std::uint32_t InvertedIndex::PostingArena::allocateChunk(
     if (slabs.size() >= (std::size_t{1} << (32 - kSlabBits)) - 1) {
       throw std::length_error("InvertedIndex: posting arena exhausted");
     }
-    slabs.push_back(std::make_unique_for_overwrite<Posting[]>(kSlabSlots));
+    // Reserve first so push_back cannot throw and leak the mapping.
+    slabs.reserve(slabs.size() + 1);
+    slabs.emplace_back(
+        static_cast<Posting*>(allocatePages(sizeof(Posting) * kSlabSlots)));
     usedInLastSlab = 0;
   }
   const auto address = static_cast<std::uint32_t>(
