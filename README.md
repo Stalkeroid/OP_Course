@@ -62,9 +62,11 @@ Compose services: `server`, `ollama`, `ollama-init` (one-shot), `dataset-init`
   the Ollama model).
 - Disk (estimate): the dataset volume is about 2.1 GB, plus the Ollama model, plus
   Docker images and the build cache; keep roughly 8 GB free.
-- RAM: the index of the full dataset stays well below 1.5 GB resident
-  (design note in `server/include/search/inverted_index.h`); the Ollama model needs
-  additional memory (CPU inference, no GPU is passed into the container).
+- RAM: with the full dataset the server holds about 390 MB after an index build
+  and peaks at about 770 MB during a rebuild, because the old and the new index
+  live side by side until the swap (measured on a 2-core Linux machine over 25
+  consecutive rebuilds with 1-16 threads). The Ollama model needs additional
+  memory (CPU inference, no GPU is passed into the container).
 
 ## Quick start
 

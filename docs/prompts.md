@@ -1015,4 +1015,201 @@ REPORT BACK
 - A short list of what a human must still check on a real machine.
 ```
 
-Outcome: pending
+Outcome: accepted (about 150 checks; contract checklist 29/29 pass; 10 findings routed to prompts 11-13 and to small fixes by the orchestrator)
+
+### 11. api-contract — contract amendments after verification
+Date: 2026-11-16
+Model: opus
+Prompt:
+
+```
+Repository: /home/claude/op_course. English only. Your role file was loaded as
+your system prompt. Edit docs/API.md only.
+
+An independent verification of the finished server found three places where the
+contract promises more than a fixed-size server can deliver, or says nothing.
+Amend docs/API.md so that it states the following rules precisely, in the
+sections where a reader would look for them, keeping the document's style
+(tables, MUST/ALWAYS wording). Do not change any mandatory shape, field, code
+or existing default.
+
+1. Bounded query expansion (sections 5.3/5.4, and wherever the fallback reasons
+   are listed, including the WebSocket section's situations table):
+   the server runs at most 8 Ollama expansion calls at the same time, counted
+   across REST and WebSocket together. A request that needs expansion while 8
+   are already in flight does NOT wait: it proceeds at once with the fallback
+   rule (`expansion` = "fallback", expanded_terms = original tokens). This is
+   load shedding, not an error. State the reason: a slow or hanging Ollama must
+   never occupy all request workers.
+2. Health guarantee (section 6.2): thanks to rule 1, GET /api/health (and
+   GET /api/stats) answer within 3 seconds even when Ollama hangs and many
+   searches are waiting on it. Keep the existing rules.
+3. WebSocket capacity (section 10.1): queries of all connections are executed
+   by a fixed pool of max(16, 2 x hardware_concurrency) workers. While fewer
+   queries than that are running, connections are independent; when all workers
+   are busy, further queries (from any connection) wait and are started in
+   arrival order. Additionally: a client frame that fails validation
+   (invalid_json, invalid_body, invalid_query, empty_query, invalid_mode,
+   invalid_limit, invalid_expand) on a connection that has no query running or
+   queued is answered immediately, without waiting for a pool worker; if that
+   connection has earlier queries pending, the error keeps its FIFO position.
+4. HEAD (sections 2.1 and 13): the HEAD method is not supported. The response
+   to a HEAD request on any path is produced by the HTTP library (currently
+   404 with a short non-JSON body) and is outside this contract; the
+   405 method_not_allowed rule applies to the other methods (e.g. PUT, DELETE,
+   PATCH, GET on a POST-only path).
+5. Conformance checklist (section 14): add or adjust items so that rules 1-4
+   are checkable (e.g. "with a hanging Ollama and 16 concurrent searches,
+   exactly the excess over 8 return at once with expansion=fallback and health
+   answers within 3 s").
+
+Report back: the list of sections changed with a one-line summary each, and
+anything in these rules that conflicts with existing text and how you resolved it.
+```
+
+Outcome: accepted (rules added, no mandatory shape changed)
+
+### 12. concurrency-core — bound memory across index rebuilds
+Date: 2026-11-16
+Model: opus
+Prompt:
+
+```
+Repository: /home/claude/op_course. English only. Your role file was loaded as
+your system prompt; this is a follow-up on your own component.
+
+FINDING (independent verifier, full dataset 2.2 GB / 20 000 documents)
+Resident memory of search_server grows on every POST /api/index rebuild:
+VmRSS 393 MB -> 749 -> 1077 -> 1453 -> 1821 -> 2124 -> 2393 -> 2418 MB over
+builds with threads cycling 1-4, although one index needs ~390 MB. It is not a
+true leak: with MALLOC_ARENA_MAX=1 it levels off at ~770 MB (old + new index
+during the swap). So freed index memory stays inside glibc malloc arenas
+(per-thread arenas, raised dynamic mmap threshold, fragmentation) and is not
+reused or returned. The benchmark performs ~25 rebuilds with up to 16 threads;
+under a Docker Desktop memory limit the server could be killed.
+
+GOAL
+After any number of rebuilds (any thread counts, including 16 on this 2-core
+machine) RSS returns to roughly one index and never exceeds roughly
+(old index + new index + per-thread working buffers) during a build — without
+slowing the build down measurably and without setting MALLOC_ARENA_MAX=1
+(a single arena would serialise allocations of all workers).
+
+DIRECTIONS (choose what the measurements support; explain the choice briefly
+in a code comment, the student has to defend it)
+- The index already allocates postings from 256 KiB slabs: make the big
+  blocks come from, and go back to, the OS deterministically (e.g. allocate
+  slabs with mmap/munmap directly on Linux, or fix M_MMAP_THRESHOLD with
+  mallopt so that glibc does not raise it dynamically), instead of from
+  per-thread arenas.
+- Per-thread scratch memory of pool workers (file buffer, term-count table)
+  dies with the pool after each build: make sure it is really released.
+- Return freed arena memory after an index is destroyed and after a build
+  (malloc_trim) if that is still needed once the above is done.
+- Keep everything guarded so the code still compiles on non-glibc platforms
+  (macOS local builds): #if defined(__GLIBC__) / __linux__.
+- Keep the change inside the core library (server/include/search/*.h,
+  server/src/inverted_index.cpp, index_builder.cpp, custom_thread_pool.cpp and
+  a new small file if useful). The served index is destroyed wherever the last
+  shared_ptr is dropped, so cleanup tied to index destruction belongs in the
+  index's own destructor, not in the service. Do NOT edit
+  search_pipeline_service.*, api_server.*, main.cpp, docs/, README.md or
+  docker-compose.yml.
+
+MEASURE (before and after, same procedure; report a table)
+- Dataset: generate once with
+  python3 dataset/generate.py --out /tmp/dsfull --size-mb 2100 --docs 20000
+  (about one minute, 2.2 GB; delete it when you are done).
+- Use the real server so that the old-index/new-index swap is included: build
+  in your own build directory build/core-mem (cmake -S . -B build/core-mem
+  -DCMAKE_BUILD_TYPE=Release, -j2; nobody else is building right now), run
+  search_server with PORT=18110 DATASET_PATH=/tmp/dsfull OLLAMA_URL=http://127.0.0.1:1,
+  then 10 rebuilds with threads cycling 1,2,4,16, recording VmRSS and VmHWM
+  from /proc/<pid>/status after each build and the reported time_ms.
+- Build-time check: 3 builds each with 1 and 2 threads before and after; the
+  change must not make them slower beyond noise.
+- All tests must pass (ctest in your build dir), and core_tests and
+  service_tests must stay clean under -DENABLE_TSAN=ON (build/tsan).
+  clang-format -i touched files. Do NOT run git add / git commit / git push.
+
+REPORT BACK (concise): what you changed and why it works; the before/after RSS
+table and build times; peak RSS (VmHWM) observed during a rebuild; test results;
+one sentence the README can state about memory use, with the measured numbers.
+```
+
+Outcome: accepted (RSS after 10 rebuilds 395 MB instead of 1916 MB, build time unchanged, as measured by the subagent; tests rerun by the orchestrator)
+
+### 13. backend-api — bounded expansions, WebSocket fast error path
+Date: 2026-11-16
+Model: sonnet
+Prompt:
+
+```
+Repository: /home/claude/op_course. English only. Your role file was loaded as
+your system prompt; this is a follow-up on your own component after an
+independent verification. docs/API.md has just been amended: re-read sections
+5.3, 5.4, 6.2, 10.1, 10.5, 13 and the conformance checklist (14) before coding
+— they now define the behaviour below; implement exactly what they say.
+
+FINDINGS TO FIX
+F3. With an Ollama that accepts connections but never answers, 16 concurrent
+    POST /api/search requests occupy all 16 HTTP workers for the 15 s timeout;
+    GET /api/health then takes 16 s instead of <= 3 s.
+F4. With 16 WebSocket connections waiting on such an Ollama, a 17th connection
+    sending invalid JSON gets its error stage only after ~14.5 s.
+
+REQUIRED BEHAVIOUR (as now written in docs/API.md)
+1. At most 8 Ollama expansion calls in flight at once, counted across REST and
+   WebSocket together (one limiter owned by SearchPipelineService or
+   OllamaClient; a named constant, e.g. kMaxConcurrentExpansions = 8). A request
+   that needs expansion while 8 are in flight does not wait: it continues at
+   once with the fallback (expansion "fallback"). Release the slot on every
+   path (RAII), including exceptions and timeouts.
+2. Consequently health and stats answer within 3 s under the F3 scenario.
+3. WebSocket: a frame that fails validation on a connection with no query
+   running or queued is answered immediately on the calling (I/O) thread,
+   without a pool worker. If that connection has queries pending, the error
+   keeps its FIFO position exactly as today. No message may ever be reordered
+   or interleaved; keep the closed-connection guarantees.
+4. In SearchPipelineService::buildIndex the previous index is currently
+   destroyed inside the `servedIndex_ = std::move(built)` assignment while
+   indexMutex_ is held; destroying a 380 MB index takes ~40 ms and blocks every
+   snapshot() meanwhile. Move the old pointer out under the lock and let it
+   die after the lock is released.
+Do not change anything else in behaviour. HEAD handling stays as it is (the
+contract now says HEAD is unsupported).
+
+FILES: server/include/search/{search_pipeline_service,ollama_client}.h,
+server/src/{search_pipeline_service,ollama_client,api_server}.cpp and the
+service tests. Do not touch the core library files (inverted_index, snippet,
+index_builder, custom_thread_pool, tokenizer), docs/, README.md, web/, cli/.
+
+TESTS
+- Limiter: with a fake Ollama that blocks until released, start 12 concurrent
+  expansions -> exactly 8 reach the fake, 4 return immediately as fallback;
+  after release, a new expansion reaches the fake again (slots were returned).
+  Same counter shared by REST-style and streaming calls.
+- WebSocket fast path: invalid frame on an idle session is answered without the
+  pool (make it observable, e.g. the pool is saturated with blocked tasks and
+  the error still arrives promptly); invalid frame behind a pending query keeps
+  its position.
+- Whole suite passes in the normal build; service_tests clean under
+  -DENABLE_TSAN=ON. Use your own build directories build/backend-fix and
+  build/backend-tsan (cmake -S . -B … ; -j2). clang-format -i touched files.
+- End-to-end evidence with the real binary and a hanging fake Ollama (a Python
+  script in /tmp that accepts /api/generate and sleeps 30 s, answers /api/tags
+  normally): 16 concurrent POST /api/search -> 8 return within ~100 ms with
+  expansion "fallback", 8 after the timeout; GET /api/health during that time
+  -> < 3 s (report the measured time); a WebSocket connection sending
+  `not json` while 16 other connections wait -> error stage promptly.
+  Dataset: /tmp/ds100 (recreate with `python3 dataset/generate.py --out
+  /tmp/ds100 --size-mb 100 --docs 2000` if missing).
+Do NOT run git add / git commit / git push.
+
+REPORT BACK (concise): files changed; how the limiter and the fast path work
+(3-4 lines each); test results (normal + TSAN); the measured end-to-end
+numbers; one paragraph (plain English) that the explanatory note can use to
+describe the limiter.
+```
+
+Outcome: accepted (133 tests pass; core and service suites clean under ThreadSanitizer, rerun by the orchestrator; health answers in milliseconds with a hanging Ollama, as measured by the subagent)
