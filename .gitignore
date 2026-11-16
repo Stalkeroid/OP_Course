@@ -1,0 +1,21 @@
+# Build
+build/
+cmake-build-*/
+out/
+
+# Dataset and generated data (lives in a Docker volume)
+data/
+dataset/data/
+
+# Benchmarks temp
+bench/.venv/
+__pycache__/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local Claude settings
+.claude/settings.local.json

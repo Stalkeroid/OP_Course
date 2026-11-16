@@ -4,7 +4,8 @@
 
 ---
 
-Read CLAUDE.md and the agents in .claude/agents/. Assignment summary: parallel
+Read CLAUDE.md, the agents in .claude/agents/ and the assignment in
+docs/assignment/coursework-2026-2027.pdf (Ukrainian). Assignment summary: parallel
 search engine in C++20 with a custom thread pool, a custom concurrent inverted
 index, REST API (/api/health, /api/index, /api/search, /api/stats), WebSocket
 /ws/search streaming query_expansion → keyword_search → done, query expansion via
