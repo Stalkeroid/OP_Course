@@ -73,7 +73,12 @@ Field classification used in every table below:
 - Servers MUST NOT require authentication. No CORS headers are sent (the Web UI is served
   from the same origin, see §13).
 - All requests are processed concurrently (Crow multithreaded mode). Searches never wait
-  for an index rebuild (see §7.4).
+  for an index rebuild (see §7.4). At most 8 searches at a time wait on Ollama; further
+  searches skip expansion instead of waiting (§5.4).
+- Supported methods are `GET` and `POST` (one per `/api/*` path, see §1). The
+  `HEAD` method is **not supported**: the response to a `HEAD` request on any path is
+  produced by the HTTP library (currently `404` with a short non-JSON body) and is
+  outside this contract. See §13 for `405 method_not_allowed`.
 
 ### 2.2 JSON types and C++ types
 
@@ -133,14 +138,15 @@ Clients MUST branch on the HTTP status and `code`, never on `error` text.
 | 400 | `invalid_limit` | `limit` present and not an integer, or outside `[1, 100]` | `POST /api/search`, WS |
 | 400 | `invalid_expand` | `expand` present and not a boolean | `POST /api/search`, WS |
 | 404 | `not_found` | Unknown path under `/api/` | any |
-| 405 | `method_not_allowed` | Known `/api/*` path, wrong HTTP method | any |
+| 405 | `method_not_allowed` | Known `/api/*` path, wrong HTTP method (`GET`, `POST`, `PUT`, `DELETE`, `PATCH`; `HEAD` is outside the contract, §13) | any |
 | 409 | `index_in_progress` | `POST /api/index` while another build is running | `POST /api/index` |
 | 500 | `dataset_not_found` | `DATASET_PATH` does not exist or is not a readable directory | `POST /api/index` |
 | 500 | `dataset_empty` | `DATASET_PATH` contains zero `.txt` files that could be read | `POST /api/index` |
 | 500 | `internal_error` | Any unexpected exception (caught at the handler boundary) | any |
 | 503 | `index_not_built` | Search requested but no index build has ever completed | `POST /api/search`, WS |
 
-Ollama being unavailable is **never** an error (see §5.4).
+Ollama being unavailable, slow or busy is **never** an error, and neither is the
+expansion concurrency limit being reached (see §5.4).
 
 ### 3.3 Validation order
 
@@ -291,14 +297,34 @@ Every pipeline run reports how `expanded_terms` was produced in the extension fi
 | Value | Meaning |
 |---|---|
 | `"llm"` | Ollama answered and parsing succeeded (even if `L` turned out empty) |
-| `"fallback"` | Ollama call failed (connection refused, timeout, non-200, model missing, unparsable answer) → `L` empty |
+| `"fallback"` | Ollama call failed (connection refused, timeout, non-200, model missing, unparsable answer) **or** was not attempted because 8 expansion calls were already in flight (§5.4) → `L` empty |
 | `"disabled"` | Request had `"expand": false`, or the query has no tokens (`O` empty, §4.2) → Ollama not called, `L` empty |
 
-### 5.4 Fallback rule
+### 5.4 Fallback rule and concurrency bound
 
-On any Ollama failure the request **still succeeds** with HTTP 200 (or the normal WS
-sequence): `expanded_terms` = `O` (tokens of the original query), `expansion` =
+**Fallback.** On any Ollama failure the request **still succeeds** with HTTP 200 (or the
+normal WS sequence): `expanded_terms` = `O` (tokens of the original query), `expansion` =
 `"fallback"`. Ollama failures are never reported as errors.
+
+**Concurrency bound (load shedding).** The server runs **at most 8** Ollama expansion
+calls (`POST {OLLAMA_URL}/api/generate`) at the same time, counted across
+`POST /api/search` and `/ws/search` together (one server-wide counter; C++ constant
+`kMaxConcurrentExpansions = 8`).
+
+| Situation when a query needs expansion (`expand` = `true` and `O` non-empty) | Behaviour |
+|---|---|
+| Fewer than 8 expansion calls in flight | takes a slot, calls Ollama; the slot is released when the call ends (success, failure, timeout or exception) |
+| 8 expansion calls already in flight | does **not** wait and does **not** call Ollama: proceeds at once with the fallback rule above (`expansion` = `"fallback"`, `expanded_terms` = `O`) |
+
+Rules:
+
+- This is load shedding, **not an error**: HTTP 200 / normal WS sequence, no error code.
+- Queries with `expansion` = `"disabled"` never take a slot. The health probe
+  (`GET {OLLAMA_URL}/api/tags`, §6.2) is not an expansion call and is not counted.
+- Reason: an expansion call can block its worker for up to `OLLAMA_TIMEOUT_MS`
+  (15 s by default). A slow or hanging Ollama MUST NEVER occupy all request workers;
+  with the bound, at most 8 workers are ever blocked on Ollama, so health, stats,
+  index and non-expanded searches keep being served.
 
 ---
 
@@ -325,6 +351,11 @@ Rules:
   state or index state. It never returns the error shape (except `internal_error` 500
   on a programming bug).
 - The response is sent within 3 seconds even if Ollama hangs (2000 ms check timeout).
+- This 3-second bound ALWAYS holds, including when Ollama accepts connections but never
+  answers **and** many searches are waiting on it: by §5.4 at most 8 of the
+  max(16, 2 × `hardware_concurrency`) HTTP workers can be blocked by expansion calls,
+  so a worker is free for the health request. `GET /api/stats` has the same 3-second
+  bound under the same conditions (§9.2).
 - The Ollama check result MAY be cached for at most 5 seconds.
 
 ### 6.3 Example
@@ -431,7 +462,7 @@ Runs the full pipeline: query expansion (§5) → keyword search (§4).
 | `query` | Mandatory | string | `std::string` | **yes** | 1..1000 bytes UTF-8; not empty/whitespace-only | — |
 | `mode` | Mandatory | string | `std::string` | no | exactly `"keyword"` | `"keyword"` |
 | `limit` | Extension | integer | `int` | no | `1 ≤ limit ≤ 100` | `10` |
-| `expand` | Extension | boolean | `bool` | no | — | `true` (call Ollama); `false` skips Ollama (`expansion` = `"disabled"`), used by benchmarks to measure pure keyword-search throughput |
+| `expand` | Extension | boolean | `bool` | no | — | `true` (call Ollama, subject to the concurrency bound of §5.4); `false` skips Ollama (`expansion` = `"disabled"`), used by benchmarks to measure pure keyword-search throughput |
 
 ```json
 { "query": "climate change effects", "mode": "keyword" }
@@ -541,6 +572,8 @@ No body, no parameters.
 Rules:
 
 - ALWAYS HTTP 200 (also before the first build and during a build).
+- Never contacts Ollama; answered within 3 seconds even when Ollama hangs and many
+  searches are waiting on it (same reasoning as §6.2, via the bound of §5.4).
 - During a rebuild the values describe the **previous** (still served) index; they change
   only when the new index is swapped in.
 
@@ -571,7 +604,24 @@ Streams the pipeline stages of a search, one JSON text message per stage
 - Queries on one connection are processed **strictly sequentially in arrival order
   (FIFO)**. If a query arrives while a previous one is still running, it is queued; the
   messages of different queries are never interleaved.
-- Different connections are processed concurrently and independently.
+- **Capacity.** Queries of all connections are executed by one fixed pool
+  (`CustomThreadPool`) of max(16, 2 × `std::thread::hardware_concurrency()`) workers,
+  separate from the HTTP workers. At most one query per connection runs at a time
+  (rule above), so:
+  - while fewer queries than the pool size are running, different connections are
+    processed concurrently and independently;
+  - when all workers are busy, further queries (from any connection) wait and are
+    started in arrival order — precisely, in the order in which they became ready to
+    run, a query being ready once it has arrived and every earlier query of its own
+    connection has finished.
+- **Fast error path.** A client frame that fails validation (`invalid_json` — including a
+  binary frame —, `invalid_body`, `invalid_query`, `empty_query`, `invalid_mode`,
+  `invalid_limit`, `invalid_expand`) on a connection that has **no query running or
+  queued** is answered immediately, without waiting for a pool worker, even when the
+  pool is saturated. If that connection has earlier queries pending, the `error` message
+  keeps its FIFO position: it is sent after the earlier queries' sequences, never before
+  or between them. `index_not_built` is a state check, not validation, and is answered
+  through the pool like any valid query.
 - If the client disconnects mid-pipeline, the server stops sending and discards the
   remaining work's output; this is not an error.
 
@@ -669,6 +719,8 @@ starts (so the client can display it while searching).
 | No index built yet | `error` with `index_not_built` (no `query_expansion` is sent) | stays open |
 | Index rebuild in progress but an old index exists | normal sequence on the old index | stays open |
 | Ollama down / model not ready | normal sequence, `expansion` = `"fallback"` | stays open |
+| 8 expansion calls already in flight (REST + WS together, §5.4) | normal sequence at once, `expansion` = `"fallback"` (load shedding, not an error) | stays open |
+| All WS pool workers busy (§10.1) | valid query: waits, then normal sequence; invalid frame on an idle connection: `error` at once | stays open |
 
 ### 10.6 Protocol limits
 
@@ -742,7 +794,13 @@ ends the session because the server never closes the connection itself.)
   `404` with a plain-text body if absent. These routes are not part of the JSON contract.
 - Any unknown path starting with `/api/` returns `404` with the error shape
   (`not_found`); a known `/api/*` path with the wrong method returns `405`
-  (`method_not_allowed`), e.g. `GET /api/search`, `POST /api/health`.
+  (`method_not_allowed`), e.g. `GET /api/search`, `POST /api/health`,
+  `PUT /api/index`, `DELETE /api/stats`, `PATCH /api/search`.
+- **`HEAD` is not supported.** The response to a `HEAD` request on any path (API,
+  static or WebSocket) is produced by the HTTP library — currently `404` with a short
+  non-JSON body — and is outside this contract; clients MUST NOT rely on it. The
+  `405 method_not_allowed` rule above applies to `GET`, `POST`, `PUT`, `DELETE` and
+  `PATCH`.
 
 ---
 
@@ -750,11 +808,16 @@ ends the session because the server never closes the connection itself.)
 
 A verifier walks through these in order against a freshly started stack
 (`docker compose up`). "Shape" means: exactly the listed mandatory fields with the
-listed JSON types, plus only the listed extension fields.
+listed JSON types, plus only the listed extension fields. Items 2a, 22a, 22b and 27a
+need a stand-in Ollama at `OLLAMA_URL` that answers `/api/tags` normally and accepts
+`/api/generate` but never replies (a "hanging Ollama").
 
 **Health**
 1. `GET /api/health` → 200, shape `{status:"ok", ollama:bool, index_ready:bool, indexing:bool}`.
 2. With Ollama stopped (`docker compose stop ollama`) → still 200, `ollama: false`, answered within 3 s.
+2a. With an Ollama that accepts connections but never answers, and 16 concurrent
+    `POST /api/search` requests with expansion in flight → `GET /api/health` and
+    `GET /api/stats` each answer 200 within 3 s (§6.2, §9.2).
 
 **Before indexing**
 3. `GET /api/stats` → 200, `documents`, `index_build_time_ms`, `threads_used` all `0`, `index_ready: false`.
@@ -781,6 +844,15 @@ listed JSON types, plus only the listed extension fields.
 20. `{"query":""}` / `{"query":"   "}` → 400 `empty_query`; `{}` / `{"query":5}` → 400 `invalid_query`; `{"query":"a","mode":"semantic"}` → 400 `invalid_mode`; `{"query":"a","limit":0}` / `101` → 400 `invalid_limit`; `{"query":"a","expand":"no"}` → 400 `invalid_expand`.
 21. `limit: 100` returns at most 100 results; snippets contain no `\n`/`\t`, are ≤ 206 code points, valid UTF-8, contain a query term (case-insensitive) unless `""`.
 22. A search issued during a running rebuild returns 200 (served by the old index).
+22a. Expansion bound (§5.4): with an Ollama that accepts connections but never answers
+     (index built), send 16 concurrent `POST /api/search {"query":"<common word>"}` →
+     exactly 8 return at once (well under 1 s) with 200, `expansion: "fallback"` and
+     `expanded_terms` = query tokens; the other 8 return 200 `expansion: "fallback"`
+     only after `OLLAMA_TIMEOUT_MS`. The fake Ollama receives exactly 8
+     `/api/generate` calls. Afterwards (Ollama answering normally) a new search gets
+     `expansion: "llm"` again (slots were released).
+22b. The bound is shared: with 8 WS queries waiting on the hanging Ollama, a
+     `POST /api/search` needing expansion returns at once with `expansion: "fallback"`.
 
 **WebSocket**
 23. Send `{"query":"climate change"}` → exactly three messages in order `query_expansion`, `keyword_search`, `done`; `done` is exactly `{"stage":"done"}`.
@@ -788,7 +860,19 @@ listed JSON types, plus only the listed extension fields.
 25. Send two queries back-to-back on one connection → two complete, non-interleaved sequences in order.
 26. Send `not json` → `error` / `invalid_json`; then a valid query on the same connection → full sequence.
 27. Send `{"query":""}` → single `error` / `empty_query`, no `done`.
+27a. Fast error path (§10.1): with a hanging Ollama (index built), open 16 connections
+     that each send one expanding query; exactly 8 of them receive their full sequence
+     at once with `expansion: "fallback"` (§5.4), the other 8 stay blocked until
+     `OLLAMA_TIMEOUT_MS`. Meanwhile a 17th connection sending `not json` gets
+     `error` / `invalid_json` within 1 s. (Full pool saturation, which a hanging
+     Ollama alone can no longer cause, is covered by the service unit tests.)
+27b. On one connection, send a valid query immediately followed by `not json` → the
+     complete sequence of the first query, then `error` / `invalid_json` (FIFO
+     position kept, no interleaving).
 
 **General**
 28. All `/api/*` responses have `Content-Type: application/json`; all errors use `{status:"error", code, error}` with the status codes of §3.2.
 29. `GET /api/unknown` → 404 `not_found`; `GET /api/search` → 405 `method_not_allowed`.
+30. `PUT /api/index`, `DELETE /api/stats`, `PATCH /api/search`, `POST /api/health` → 405
+    `method_not_allowed` with the error shape. `HEAD` requests are not checked (outside
+    the contract, §13).
