@@ -1,0 +1,101 @@
+# Parallel search engine: `docker compose up` starts everything, no .env needed.
+#
+# Start order:
+#   ollama -> ollama-init (pull model, one-shot, never blocks the server)
+#   dataset-init (generate dataset once) -> server
+#
+# Host-overridable variables (defaults shown), e.g.
+#   DATASET_SIZE_MB=100 DATASET_DOCS=2000 docker compose up
+#   OLLAMA_MODEL      llama3.2:1b   model for query expansion
+#   DATASET_SIZE_MB   2100          total dataset size in MB
+#   DATASET_DOCS      20000         number of documents
+#   DATASET_SEED      42            generator seed (deterministic)
+#   PORT              8080          host and container HTTP/WS port
+#   OLLAMA_TIMEOUT_MS 15000         timeout of one expansion call
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_models:/root/.ollama
+    # Port 11434 is intentionally NOT published: only the server needs it.
+    healthcheck:
+      # The image has no curl; `ollama list` talks to the local API.
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+  ollama-init:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:1b}
+    # Idempotent: `ollama pull` is a no-op when the model is present.
+    # A failed pull (offline) only prints a warning and exits 0.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Pulling $${OLLAMA_MODEL} ..."
+        ollama pull "$${OLLAMA_MODEL}" || echo "WARNING: pull failed; server still works with fallback expansion"
+        exit 0
+    restart: "no"
+
+  dataset-init:
+    image: python:3.12-slim
+    volumes:
+      - dataset:/data/dataset
+      - ./dataset:/gen:ro
+    environment:
+      DATASET_SIZE_MB: ${DATASET_SIZE_MB:-2100}
+      DATASET_DOCS: ${DATASET_DOCS:-20000}
+      DATASET_SEED: ${DATASET_SEED:-42}
+    # generate.py --if-needed exits at once when .complete matches size/docs/seed,
+    # otherwise it wipes the target and regenerates.
+    command:
+      - /bin/sh
+      - -c
+      - >
+        python3 /gen/generate.py --out /data/dataset
+        --size-mb "$${DATASET_SIZE_MB}" --docs "$${DATASET_DOCS}"
+        --seed "$${DATASET_SEED}" --if-needed
+    restart: "no"
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: parallel-search-server:latest
+    depends_on:
+      dataset-init:
+        condition: service_completed_successfully
+      # service_started only: health must be 200 even while the model downloads.
+      ollama:
+        condition: service_started
+    ports:
+      - "${PORT:-8080}:${PORT:-8080}"
+    volumes:
+      - dataset:/data/dataset:ro
+    environment:
+      PORT: ${PORT:-8080}
+      DATASET_PATH: /data/dataset
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:1b}
+      OLLAMA_TIMEOUT_MS: ${OLLAMA_TIMEOUT_MS:-15000}
+      WEB_ROOT: /app/web
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:$${PORT}/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  ollama_models:
+  dataset:

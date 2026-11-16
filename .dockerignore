@@ -1,0 +1,13 @@
+.git
+.claude
+build/
+cmake-build-*/
+out/
+data/
+dataset/data/
+bench/
+docs/
+*.md
+.vscode/
+.idea/
+__pycache__/
