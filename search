@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# CLI entry point: ./search "query"   (see ./search --help)
+# Default: run the CLI binary inside the running `server` compose service.
+# SEARCH_CLI_LOCAL=/path/to/search_cli runs a local binary instead.
+set -u
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOCAL_BIN="$ROOT/build/cli/search_cli"
+
+if [ -n "${SEARCH_CLI_LOCAL:-}" ]; then
+  if [ ! -x "$SEARCH_CLI_LOCAL" ]; then
+    echo "error: SEARCH_CLI_LOCAL=$SEARCH_CLI_LOCAL is not an executable file" >&2
+    exit 2
+  fi
+  exec "$SEARCH_CLI_LOCAL" "$@"
+fi
+
+if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+  cd "$ROOT" || exit 2
+  running="$(docker compose ps --status running --services 2>/dev/null | grep -x server || true)"
+  if [ -n "$running" ]; then
+    exec docker compose exec -T server /app/search_cli "$@"
+  fi
+  if [ ! -x "$LOCAL_BIN" ]; then
+    echo "error: the 'server' container is not running. Start it with: docker compose up -d" >&2
+    exit 2
+  fi
+fi
+
+if [ -x "$LOCAL_BIN" ]; then
+  exec "$LOCAL_BIN" "$@"
+fi
+
+echo "error: neither Docker Compose nor a local build/cli/search_cli is available." >&2
+echo "Install Docker and run 'docker compose up -d', or build locally:" >&2
+echo "  cmake -S . -B build && cmake --build build --target search_cli" >&2
+exit 2

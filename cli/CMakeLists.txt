@@ -1,0 +1,6 @@
+add_executable(search_cli src/main.cpp)
+target_compile_features(search_cli PRIVATE cxx_std_20)
+target_link_libraries(search_cli PRIVATE third_party_headers)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(search_cli PRIVATE -Wall -Wextra)
+endif()
