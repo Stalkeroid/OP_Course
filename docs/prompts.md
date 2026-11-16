@@ -332,3 +332,154 @@ was emitting a very large word list, so:
 ```
 
 Outcome: accepted (Docker files reviewed, generator run locally; image build not runnable in the sandbox)
+
+### 5. backend-api — HTTP/WebSocket server, pipeline service, Ollama client
+Date: 2026-11-16
+Model: sonnet
+Prompt:
+
+```
+You are the `backend-api` agent for the repository at /home/claude/op_course
+(C++20 coursework: parallel search engine with LLM query expansion). English only.
+
+READ FIRST, in this order:
+1. .claude/agents/backend-api.md — your role; treat its body as instructions.
+2. CLAUDE.md — project rules ("Fixed technical decisions" are binding).
+3. docs/API.md — read ALL of it carefully. It is the contract; an independent
+   verifier will compare your server with it field by field (names, JSON types,
+   status codes, error codes, validation order, message order, defaults).
+4. server/include/search/*.h — the finished core library `search_core`
+   (CustomThreadPool, tokenizer + buildQueryTerms/originalQueryTokens,
+   InvertedIndex, makeSnippetFromFile, IndexBuilder::buildIndex). Use it; do not
+   reimplement tokenisation, scoring or snippets.
+5. docs/uml/class-diagram.png and sequence-streaming-search.png — keep class and
+   method names: ApiServer (handleHealthCheck, handleIndexPost, handleSearchPost,
+   handleWebSocket), SearchPipelineService (buildIndex, performKeywordSearch,
+   performStreamingSearch), OllamaClient (expandQuery, checkHealth).
+
+GOAL
+A working `search_server` executable implementing every endpoint and the
+WebSocket of docs/API.md, plus tests.
+
+FILES YOU OWN
+- server/CMakeLists.txt: add your part in the marked section (keep the existing
+  targets working). Fetch Crow, nlohmann/json and cpp-httplib with FetchContent
+  at pinned release tags (check the current tags with `git ls-remote --tags`).
+  Crow needs standalone Asio: fetch it with FetchContent too (header-only) so the
+  Docker build needs no extra system package. No OpenSSL, no zlib features.
+  Put your code in a static library (e.g. `search_service`) linked by the
+  `search_server` executable and by your tests.
+- server/include/search/ and server/src/: api_server, search_pipeline_service,
+  ollama_client, config, main.cpp (new files only).
+- server/tests/: new test files; add them to a test target (extend core_tests or
+  add `service_tests`, registered with CTest).
+Do NOT touch: docs/, docker-compose.yml, dataset/, web/, cli/, .gitignore.
+Do not modify the existing core files; if you find a bug or a missing accessor
+there, make the smallest possible change and list it in your report. If the
+Dockerfile build stage would need a change because of your dependencies, say so
+in the report instead of editing it.
+
+REQUIREMENTS BEYOND THE CONTRACT TEXT
+- Configuration only from the environment variables of docs/API.md 12, with the
+  defaults given there. Listen on 0.0.0.0:PORT.
+- Concurrency:
+  * HTTP handlers run on Crow's worker threads; set Crow concurrency to
+    max(16, 2 x hardware_concurrency) because /api/index (synchronous build) and
+    searches with query expansion block a worker for a long time, and
+    /api/health and /api/stats must still answer meanwhile.
+  * No global mutex around searches. The served index is a
+    std::shared_ptr<const InvertedIndex> swapped under a small mutex (or
+    std::atomic<std::shared_ptr>); a search copies the pointer and works on its
+    snapshot. One build at a time via an atomic flag -> 409 index_in_progress.
+  * WebSocket: never run the pipeline on Crow's I/O callback thread. Use a
+    CustomThreadPool (our own class, from search_core) owned by the service for
+    WebSocket queries. Per connection: FIFO queue, at most one query running,
+    messages of different queries never interleaved, different connections in
+    parallel. A connection may close while its query is queued or running: keep
+    per-connection state in a shared_ptr with a "closed" flag so that no send
+    happens on a dead connection and nothing is freed while a worker uses it.
+- performStreamingSearch must send `query_expansion` as soon as expansion is
+  done, before the keyword search starts (docs/API.md 10.4).
+- OllamaClient: cpp-httplib; connect/read timeouts from OLLAMA_TIMEOUT_MS;
+  request and response handling exactly as docs/API.md 5; health check per
+  docs/API.md 6 (GET /api/tags, 2000 ms, result cached for at most 5 s, cache
+  shared between threads safely). Keep the prompt text in one named constant.
+  Any failure -> fallback, never an error to the client.
+- JSON: nlohmann/json for parsing and serialising everywhere (not Crow's json).
+  Validate strictly per docs/API.md 2 and 3 (integers must be JSON integers,
+  null = absent, unknown fields ignored). Serialise `score` per 2.4.
+  Response header Content-Type: application/json for all /api/* responses.
+- Error shape for unknown /api/* paths (404 not_found) and wrong methods
+  (405 method_not_allowed): implement with a catch-all route; verify with curl
+  that the body is our error JSON, not Crow's default page.
+- Static files: GET / serves WEB_ROOT/index.html; other non-/api, non-/ws paths
+  serve files under WEB_ROOT with correct Content-Type (html, css, js, svg, png,
+  ico, json); reject path traversal; 404 plain response if missing. web/ is
+  still empty — test with a temporary directory.
+- Clean shutdown on SIGINT/SIGTERM (docker stop must not hang for 10 s).
+- One log line to stdout per request is enough (method, path, status, ms);
+  startup line with the effective configuration.
+
+TESTS
+- Unit tests for request validation (every error code of docs/API.md 3.2 that
+  applies, including validation order) and for Ollama response parsing (valid
+  {"terms":[...]}, extra text, wrong types, empty) — structure the code so these
+  are testable without sockets.
+- A test with a fake Ollama (cpp-httplib server on a random local port inside
+  the test): "llm" path, timeout -> "fallback", connection refused -> "fallback",
+  health true/false depending on /api/tags content.
+- A pipeline test: search works on the old index while a rebuild is running and
+  the swap happens (use a small temp dataset); second concurrent build -> 409
+  equivalent at service level.
+- All existing core tests must still pass. Build with -j2 (2 cores, 7 GB RAM).
+  Run clang-format -i on your files.
+- Run your new tests once under -DENABLE_TSAN=ON (build dir build/tsan) and
+  report the result.
+
+END-TO-END SMOKE TEST (do it and paste trimmed outputs in the report)
+A dataset already exists: /tmp/ds100 (2000 .txt documents, ~105 MB; regenerate
+with `python3 dataset/generate.py --out /tmp/ds100 --size-mb 100 --docs 2000`
+if missing). Real Ollama is NOT available in this sandbox: write a small fake
+Ollama (Python stdlib http.server, kept outside the repo in /tmp) that answers
+/api/tags and /api/generate like the real one. Then, with the server running:
+1. health with Ollama down ("ollama": false) and with the fake up (true);
+2. search before index -> 503 index_not_built;
+3. POST /api/index with threads 1 and 2 -> times; GET /api/stats;
+4. POST /api/search (expansion "llm" with the fake, "fallback" without,
+   "disabled" with expand:false), limit, a no-match query;
+5. each 400 error once; 404 and 405 under /api/; 409 by starting two builds;
+6. WebSocket /ws/search with a Python client (pip install websockets
+   --break-system-packages is allowed, or a raw-socket script): the three-message
+   sequence, a second query on the same connection, the error stage for invalid
+   JSON and empty query, two queries sent back-to-back arrive un-interleaved.
+7. kill -TERM and confirm fast exit.
+Do NOT run git add / git commit / git push.
+
+REPORT BACK (concise, English)
+1. Files created/changed (flag any change to core files or needed Dockerfile change).
+2. Dependency versions pinned.
+3. The exact Ollama prompt constant (verbatim) and the request JSON you send.
+4. Test results (normal + TSAN), exact commands.
+5. Smoke-test evidence: commands and trimmed outputs for items 1–7.
+6. Deviations from docs/API.md or places where it was ambiguous, with your choice.
+```
+
+Outcome: accepted (125 tests pass; core and service suites clean under ThreadSanitizer; smoke test rerun by the orchestrator)
+
+## Query expansion prompt (sent to Ollama by the server)
+
+Constant `kExpansionPromptTemplate` in `server/include/search/ollama_client.h`;
+`{query}` is replaced by the user's query. Request: `POST {OLLAMA_URL}/api/generate`
+with `"stream": false`, `"format": "json"`, `"options": {"temperature": 0}`.
+
+```
+You are a search query expansion engine. Given a search query, list keywords and synonyms that are closely related to it.
+Rules:
+- English only.
+- Each term is a single word or a very short phrase.
+- At most 10 terms, most relevant first.
+- Do not repeat the words of the query itself.
+- No explanations, no extra text.
+Answer only with a JSON object of this exact form: {"terms": ["term1", "term2"]}
+Query: {query}
+```

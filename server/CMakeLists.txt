@@ -80,6 +80,8 @@ add_library(search_service STATIC
   src/config.cpp
   src/request_validation.cpp
   src/ollama_client.cpp
+  src/search_pipeline_service.cpp
+  src/api_server.cpp
 )
 target_include_directories(search_service PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(search_service PUBLIC cxx_std_20)
@@ -87,6 +89,9 @@ target_link_libraries(search_service PUBLIC search_core third_party_headers)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(search_service PRIVATE -Wall -Wextra)
 endif()
+
+add_executable(search_server src/main.cpp)
+target_link_libraries(search_server PRIVATE search_service)
 
 # ---------------------------------------------------------------------------
 # Unit tests (GoogleTest via FetchContent, pinned tag)
@@ -119,7 +124,9 @@ if(BUILD_TESTING)
   add_executable(service_tests
     tests/request_validation_test.cpp
     tests/ollama_client_test.cpp
-        tests/config_test.cpp
+    tests/pipeline_service_test.cpp
+    tests/api_server_test.cpp
+    tests/config_test.cpp
   )
   target_link_libraries(service_tests PRIVATE search_service GTest::gtest_main)
   gtest_discover_tests(service_tests DISCOVERY_TIMEOUT 60)
