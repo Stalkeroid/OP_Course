@@ -1213,3 +1213,367 @@ describe the limiter.
 ```
 
 Outcome: accepted (133 tests pass; core and service suites clean under ThreadSanitizer, rerun by the orchestrator; health answers in milliseconds with a hanging Ollama, as measured by the subagent)
+
+### 14. verifier — re-verification of the findings
+Date: 2026-11-16
+Model: opus
+Prompt:
+
+```
+Repository under test: https://github.com/Stalkeroid/op_course, branch main,
+HEAD a36043c (local checkout with the same commit: /home/claude/op_course — do
+not modify it or build in it). Your role file was loaded as your system prompt.
+English only. Same sandbox limits as the first verification: no Docker daemon
+or image pulls (reproduce the Dockerfile build-stage commands natively), no
+real Ollama (fakes in /tmp/verify/tools/ from the first run may be reused if
+still present; otherwise write a normal fake and a hanging fake in /tmp), 2
+cores. Work in a NEW directory /tmp/verify2 with a fresh clone.
+
+A first independent verification reported findings F1-F10. Fixes were made.
+Verify each fix from the outside, and check that nothing regressed:
+
+F1  bench Docker profile crashed (dataset/vocab not mounted): reproduce the
+    container layout (only what docker-compose.yml mounts into the `bench`
+    service, at the same paths relative to each other) and run run_all.py
+    --quick against a running server; it must complete.
+F2  memory grew on every rebuild: full-size dataset (generate with the repo's
+    generator: --size-mb 2100 --docs 20000; delete it afterwards), 8 rebuilds
+    with threads cycling 1,2,4,16, record VmRSS after each and VmHWM. Expect
+    RSS near one index after each build and a peak near two. Compare with the
+    memory statement in README.md.
+F3  health blocked by searches waiting on a hanging Ollama: 16 concurrent
+    POST /api/search with a hanging fake; measure GET /api/health and
+    GET /api/stats latency meanwhile; check how many searches return at once
+    with expansion "fallback" and how many calls the fake received (docs/API.md
+    5.4 and checklist items 2a, 22a, 22b).
+F4  WebSocket error reply delayed when other connections wait on Ollama
+    (checklist 27a, 27b).
+F5  HEAD: the contract now declares HEAD unsupported — confirm the text and
+    that PUT/DELETE/PATCH on /api/* return the 405 JSON error (checklist 30).
+F6  black --check on all tracked Python files.
+F8  test counts stated in docs/report/explanatory-note.md vs
+    --gtest_list_tests.
+F9  dataset/README.md vocabulary statement vs /api/stats unique_terms.
+F10 .gitignore covers a root .venv/.
+Regression pass: build as the Dockerfile does; all tests; both test executables
+under -DENABLE_TSAN=ON with the count of ThreadSanitizer warnings; the full
+conformance checklist of docs/API.md section 14 (every item, including the new
+ones); the scoring/snippet cross-check against your independent reference
+implementation on at least 20 queries; CLI smoke test through ./search with
+SEARCH_CLI_LOCAL; clang-format --dry-run -Werror; `docker compose config -q`.
+Also re-read the amended parts of docs/API.md (2.1, 3.2, 5.3, 5.4, 6.2, 8.1,
+9.2, 10.1, 10.5, 13, 14) for internal contradictions.
+Stop every process you started; delete large temporary data. Do not edit,
+commit or push anything.
+
+REPORT BACK: one line per finding F1-F10: FIXED / NOT FIXED / PARTLY, with the
+evidence (numbers, command output). Then any NEW failure or risk in the same
+table format as before (id, area, severity, what, evidence, what the fix
+should achieve). Then the summary counts.
+```
+
+Outcome: accepted (F1-F6, F8-F10 confirmed fixed; checklist items 1-30 pass; new finding N1 routed to prompt 15, N3 fixed by the orchestrator in docs/API.md, N2 left to the repository owner)
+
+Orchestrator edit after prompt 14 (no subagent): three wording clarifications in
+docs/API.md — sections 2.1 and 3.1 now point to the HEAD exception of section 13,
+and section 6.2 states that only one Ollama health check runs at a time while
+concurrent health requests answer with the last known result.
+
+### 15. backend-api — single-flight Ollama health check
+Date: 2026-11-16
+Model: sonnet
+Prompt:
+
+```
+Repository: /home/claude/op_course. English only. Your role file was loaded as
+your system prompt; a focused follow-up on your own component.
+
+FINDING (independent re-verification)
+docs/API.md 6.2 promises that GET /api/health always answers within 3 s. It
+does not when Ollama hangs on EVERY endpoint (including /api/tags) and several
+health requests arrive together while 8 expansions are blocked: every health
+request that misses the 5 s cache starts its own 2 s probe
+(OllamaClient::checkHealth, server/src/ollama_client.cpp), probes pile up on
+the request workers, and later requests queue behind workers held by the 15 s
+expansion calls. Measured: 16 searches + 8 concurrent health requests -> one
+health took 16.5 s and stats 14.3 s; with no searches and 24 concurrent health
+requests, stats waited 1.8 s. The Web UI polls health every 3 s per open tab.
+
+REQUIRED BEHAVIOUR (now written in docs/API.md 6.2 — read that section first)
+At most one Ollama check runs at a time. A health request arriving while a
+check is in progress does not start another one and does not wait for it: it
+answers at once with the last known result (false if no check has completed
+yet). The 5 s cache and the 2000 ms probe timeout stay as they are. The thread
+that runs the probe may take up to 2 s; nobody else is delayed.
+
+FILES: server/src/ollama_client.cpp, server/include/search/ollama_client.h and
+server/tests/ollama_client_test.cpp (fake_ollama.h if the fake needs a way to
+hang /api/tags). Nothing else.
+
+TESTS
+- With a fake whose /api/tags blocks until released: start 20 concurrent
+  checkHealth calls -> the fake receives exactly 1 /api/tags request, 19 calls
+  return within a few milliseconds with the last known value, the prober
+  returns after release (or after the timeout) and the cache is updated.
+- Existing health-cache tests keep passing. Whole suite in the normal build and
+  service_tests under -DENABLE_TSAN=ON; use build dirs build/backend-fix and
+  build/backend-tsan (-j2). clang-format -i touched files.
+- End-to-end with the real binary and a Python fake in /tmp that hangs on ALL
+  endpoints (accepts the connection, never answers): start 16 concurrent
+  POST /api/search (dataset /tmp/ds100; recreate with `python3
+  dataset/generate.py --out /tmp/ds100 --size-mb 100 --docs 2000` if missing;
+  build the index first with the fake stopped or expand:false), then 24
+  concurrent GET /api/health plus GET /api/stats at the same moment, twice in a
+  row -> report the slowest health and stats latency (must be < 3 s; all but
+  the probing request should be near-instant).
+Do NOT run git add / git commit / git push.
+
+REPORT BACK (concise): what changed; test results (normal + TSAN); the measured
+end-to-end latencies.
+```
+
+Outcome: accepted (single-flight works, 134 tests pass; the end-to-end run still showed one health request delayed behind a blocked I/O thread, routed to prompt 16)
+
+Orchestrator edit after prompt 15 (no subagent): docs/API.md 6.2 now says that
+POST /api/search and POST /api/index run on a separate request pool, never on
+the HTTP I/O threads.
+
+### 16. backend-api — move long requests off the HTTP I/O threads
+Date: 2026-11-16
+Model: sonnet
+Prompt:
+
+```
+Repository: /home/claude/op_course. English only. Your role file was loaded as
+your system prompt; follow-up on the outlier you reported.
+
+ROOT CAUSE (your hypothesis, confirmed by reading Crow)
+Crow binds every connection to one I/O thread and runs the route handler on
+that thread. POST /api/search (which may wait up to 15 s on Ollama) and
+POST /api/index (which runs for minutes) therefore block an I/O thread, and any
+other connection assigned to the same thread — e.g. a health check — stalls
+until it is free. Limiting expansions to 8 reduced the damage but cannot remove
+it.
+
+REQUIRED DESIGN (docs/API.md 6.2 now states it — read 6.2, 9.2, 5.4, 10.1)
+- POST /api/search and POST /api/index are executed by a separate request pool:
+  one more CustomThreadPool (our own class) with max(16, 2 x
+  hardware_concurrency) workers, owned by the server/service and distinct from
+  the WebSocket pool. The Crow I/O thread only validates nothing or little,
+  hands the job to the pool and returns; the response is completed later.
+- Everything else (health, stats, static files, 404/405 answers) stays on the
+  I/O threads. Validation errors of search/index may be answered inline on the
+  I/O thread if that is simpler, but long work never runs there.
+- Crow supports this: a handler with the signature
+  (const crow::request& req, crow::response& res) may return without calling
+  res.end(); the response is sent when res.end() is called later. READ the
+  Crow sources in build/_deps/crow_src-src/include/crow/ (http_connection.h,
+  http_request.h, http_response.h, routing.h) before coding and establish:
+  * how the connection is kept alive until res.end() (the
+    complete_request_handler_ captures a shared_ptr `self`);
+  * on which thread res.end() must run. Do NOT call res.end() or touch `res`
+    from the pool thread: compute the reply in the pool, then hand it back to
+    the connection's own I/O thread with crow::request::post(...) (it posts to
+    req.io_context) and set status/headers/body and call res.end() there;
+  * what happens if the client disconnects before the reply is ready
+    (res.is_alive(), the request/response objects' lifetime) and during server
+    shutdown (pool must be drained/stopped before Crow objects are destroyed;
+    no posted completion may touch a destroyed connection).
+  Copy what you need from `req` (method, url, body) before leaving the handler
+  unless you have verified that `req` stays valid until res.end().
+- The per-request log line must still be printed with the real status and the
+  total time (measured until the reply is handed back).
+- If the pool rejects a task because the server is stopping, answer 500
+  internal_error (or drop silently during shutdown) — no crash, no hang.
+- Shutdown on SIGTERM must still finish within about 3 s with requests in
+  flight (existing watchdog).
+- Crow's own concurrency (I/O threads) can stay as it is.
+- Keep the UML method names: ApiServer::handleIndexPost / handleSearchPost stay
+  the functions that produce the reply; only where they run changes.
+
+FILES: server/src/api_server.cpp, server/include/search/api_server.h,
+server/src/main.cpp if shutdown order needs it, service tests. Avoid touching
+search_pipeline_service.* unless strictly needed; do not touch the core
+library, docs/, README.md, web/, cli/.
+
+TESTS
+- api_server tests: with a service whose search blocks (fake Ollama blocking
+  /api/generate, as in the limiter tests) start the real ApiServer on a random
+  local port inside the test, fire 16 blocked searches plus a running index
+  build, then 32 health and 32 stats requests on fresh connections -> every one
+  answers in < 1 s. Release, confirm all searches complete with correct bodies.
+- A client that disconnects while its search is blocked: no crash, no leak
+  report, server keeps serving.
+- Stop the server while requests are blocked: clean exit.
+- Whole suite in the normal build; service_tests AND a run of the new
+  api_server tests under -DENABLE_TSAN=ON must show zero ThreadSanitizer
+  reports (this is the point of posting back to the I/O thread). Build dirs
+  build/backend-fix and build/backend-tsan, -j2. clang-format -i.
+- End-to-end with the real binary, repeating your previous scenario exactly:
+  fake hanging on ALL endpoints, 16 concurrent searches, 1 s later 24
+  concurrent GET /api/health + GET /api/stats, repeated 5 times in fresh
+  processes -> report the slowest health per run (target: <= ~2.1 s for the one
+  probing request, milliseconds for all others, no 16 s outlier). Then a
+  POST /api/index of /tmp/ds100 with 1 thread while 50 sequential health
+  requests on fresh connections are made -> slowest latency.
+- Throughput sanity: 16 clients of keyword-only search (expand:false) for 5 s
+  before and after the change (python3 bench/loadgen.py or bench/run_all.py
+  --quick --skip-index --skip-llm against /tmp/ds100) — report req/s for both;
+  the hand-off must not cost more than a few percent.
+Do NOT run git add / git commit / git push.
+
+REPORT BACK (concise): what you learned from Crow's source (thread and lifetime
+rules, with file:line); what changed; test results (normal + TSAN); the
+end-to-end latencies; throughput before/after; remaining risks.
+```
+
+Outcome: not merged (it removed the health outlier, but deferred responses hit a use-after-free inside Crow that could only be avoided by reaching a private member of the library, and keyword-only throughput fell about 14% on 2 cores; the orchestrator reverted the change and had the contract state the limitation instead, prompt 17)
+
+### 17. api-contract — state the health latency limit honestly
+Date: 2026-11-16
+Model: opus
+Prompt:
+
+```
+Repository: /home/claude/op_course. English only. Your role file was loaded as
+your system prompt. Edit docs/API.md only.
+
+BACKGROUND
+Section 6.2 currently promises that GET /api/health (and 9.2: GET /api/stats)
+ALWAYS answers within 3 seconds, and its third rule claims that
+POST /api/search and POST /api/index run on a separate request pool. That
+design was tried and NOT adopted: with the HTTP library in use (Crow), a
+response completed from another thread needed access to a private member of
+the library to avoid a use-after-free, and it cost about 14% of keyword-search
+throughput. The server therefore keeps this (verified) behaviour:
+- Every HTTP connection is bound to one of max(16, 2 x hardware_concurrency)
+  I/O threads for its lifetime, chosen by the HTTP library when the connection
+  is accepted; the route handler runs on that thread.
+- A handler can keep its thread busy for a long time in exactly two cases:
+  a search waiting for an Ollama expansion (at most OLLAMA_TIMEOUT_MS; at most
+  8 such calls exist at once, section 5.4) and an index build (one at a time).
+- The health handler itself never takes more than about 2 seconds: at most one
+  Ollama check runs at a time (2000 ms timeout), all other health requests
+  answer at once from the last known result; the stats handler never contacts
+  Ollama.
+- Consequently health and stats answer within 3 seconds whenever their
+  connection is served by an I/O thread that is not occupied by one of those
+  long operations. This is the normal case: at most 9 of at least 16 threads
+  can be occupied. A new connection that the library happens to bind to an
+  occupied thread waits until that operation ends (up to OLLAMA_TIMEOUT_MS for
+  an expansion, the build duration for a build). Measured: with Ollama hanging
+  on every endpoint, 16 concurrent searches and 24 concurrent health requests,
+  one health request waited about 16 s and the others answered in
+  milliseconds; with Ollama answering /api/tags, 40 concurrent health requests
+  took at most 0.01 s while 16 searches waited.
+
+TASK
+Rewrite the affected rules so that the contract promises exactly this and
+nothing more: section 6.2 (replace the "ALWAYS holds" rule and the
+request-pool sentence; keep the single-check rule and the cache rule), section
+9.2, any cross-reference added earlier in 2.1, 5.4 or 10.x that repeats the
+unconditional promise, and checklist item 2a (make it a check that passes on
+the real server and is still meaningful: e.g. with a fake Ollama that hangs
+/api/generate but answers /api/tags and 16 concurrent searches in flight,
+health and stats requests answer within 3 s; and state the documented
+limitation separately as a "known limitation", not as a checklist item).
+Add a short "Known limitations" subsection where a reader would look for it.
+Do not change any shape, field, code, default or other rule.
+
+Report back: sections changed (one line each) and the exact new text of the
+6.2 rule and of checklist item 2a.
+```
+
+Outcome: accepted (new section 2.5 with known limitations L1 and L2; conditional health/stats bound; checklist item 2a reworded)
+
+### 18. docs-writer — bring the documents in line with the final code
+Date: 2026-11-16
+Model: sonnet
+Prompt:
+
+```
+Repository: /home/claude/op_course. Your role file was loaded as your system
+prompt. README.md, docs/uml/README.md, bench/*.md: English.
+docs/report/*: Ukrainian (plain academic style, identifiers unchanged).
+
+Since README.md, docs/uml/README.md, docs/report/explanatory-note.md and
+bench/ANALYSIS.md were written, an independent verification led to changes in
+the code and the contract. Make every document agree with the code and with
+docs/API.md as they are now. Check each item against the sources named; do not
+copy from this prompt without looking.
+
+WHAT CHANGED (verify in the code before writing)
+1. Snippets: streaming extraction that stops reading the file once the window
+   is complete (server/src/snippet.cpp, snippet.h). A file without any match
+   is still read to the end.
+2. Memory: posting slabs are mmap-ed and returned with munmap; the heap is
+   trimmed after an index is destroyed and after a build
+   (server/include/search/memory_release.h, inverted_index.*, index_builder.cpp).
+   Measured figures are in the header comment and in README.md "Requirements".
+3. Query expansion is limited to 8 concurrent Ollama calls across REST and
+   WebSocket; the 9th request falls back at once
+   (SearchPipelineService::kMaxConcurrentExpansions, docs/API.md 5.4).
+4. WebSocket: an invalid frame on an idle connection is answered immediately on
+   the I/O thread (handleWebSocketMessage, docs/API.md 10.1).
+5. Health: only one Ollama check runs at a time; other health requests answer
+   with the last known value (OllamaClient::checkHealth, docs/API.md 6.2).
+6. buildIndex drops the old index after releasing the mutex.
+7. docs/API.md has a new section 2.5 "Request threads and known limitations"
+   (L1, L2) and conditional wording in 6.2 / 9.2; HEAD is declared unsupported
+   (2.1, 13).
+8. An alternative design was implemented, measured and rejected: running
+   POST /api/search and POST /api/index on a separate request pool with the
+   response completed later. It removed the health delay (slowest health 2.0 s
+   = the probing request, others milliseconds, 5 runs) but deferred responses
+   hit a use-after-free inside Crow that could only be avoided by reaching a
+   private member of the library, a duplicated Connection header had to be
+   worked around, and keyword-only throughput at 16 clients on a 2-core
+   machine fell from about 4870 to about 4130 requests/s (about 14%). It is NOT
+   in the code. Source of these numbers: docs/prompts.md entry 16 ("Outcome")
+   and this prompt; label them as development-time measurements on a 2-core
+   sandbox, not as results of the coursework benchmark.
+9. bench: the Docker `bench` service now also mounts ./dataset/vocab
+   (docker-compose.yml). Test counts: read them from the test sources or by
+   running build/server/core_tests --gtest_list_tests and
+   build/server/service_tests --gtest_list_tests (binaries are built).
+
+TASKS
+- README.md: fix anything the changes above made inaccurate (architecture
+  table, troubleshooting, configuration, benchmarks section, development
+  section test names/counts if stated). Add a short "Known limitations"
+  section that summarises docs/API.md 2.5 in three or four lines and links to it.
+- docs/uml/README.md: update the Mermaid sequence diagrams (REST search: slot
+  check and immediate fallback branch; health: single check, others get the
+  last value; build index: old index released after the swap, memory returned)
+  and the class diagram (new members/constants/files such as
+  kMaxConcurrentExpansions, expansionsInFlight_, probing_, memory_release
+  functions, snippet scanner if it is a named class) and the "PNG vs code"
+  table. Names exactly as in the code.
+- docs/report/explanatory-note.md: bring sections 3.x in line (some paragraphs
+  were already updated by hand: the memory paragraph in 3.3 and the two
+  paragraphs "Обмеження одночасних розширень" / "Швидка відповідь на помилку"
+  in 3.7 — check them against the code, keep or correct). Describe snippet
+  streaming in 3.2 and the single health check in 3.6. In section 4.7
+  (bottleneck analysis) add a subsection on the known limitation L1 and the
+  rejected request-pool alternative (item 8): what was tried, what was
+  measured, why it was not adopted, and what would be needed to do it properly
+  (an HTTP library with first-class asynchronous responses). Keep every
+  «[ЗАПОВНИТИ …]» placeholder for the student's own measurements; do not
+  invent results. Update Appendix A's table from docs/prompts.md (entries
+  14-18: number, agent, model, purpose, outcome; entry 16 is "not merged").
+  Update the test counts in 4.1 if they changed.
+- docs/report/README.md: update the checklist if needed.
+- bench/ANALYSIS.md: correct the architecture description (section 1 and the
+  search-throughput causes): searches run on the HTTP I/O threads to which
+  connections are bound; snippet reading is now early-exit; expansion limit 8;
+  mention limitation L1 where it matters for interpreting latency outliers.
+  Still no measured numbers in that file.
+Touch only these files. Do not edit docs/API.md, docs/prompts.md or code.
+Do NOT run git add / git commit / git push.
+
+REPORT BACK (concise, English): files changed with a one-line summary each;
+any statement you could not verify in the code; any remaining disagreement
+between code, docs/API.md and the documents.
+```
+
+Outcome: not run to completion (stopped at the user's request to pause before it changed any file; to be rerun unchanged when work resumes)
