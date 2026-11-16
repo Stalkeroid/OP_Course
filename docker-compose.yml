@@ -96,6 +96,29 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # Benchmarks (not started by `docker compose up`):
+  #   docker compose --profile bench run --rm bench
+  # Results land in ./bench/results and ./bench/charts on the host.
+  # Extra run_all.py options can be appended, e.g. `... run --rm bench --quick`.
+  bench:
+    image: python:3.12-slim
+    profiles: ["bench"]
+    depends_on:
+      server:
+        condition: service_healthy
+    working_dir: /bench
+    volumes:
+      - ./bench:/bench
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PIP_ROOT_USER_ACTION: ignore
+    entrypoint:
+      - /bin/sh
+      - -c
+      - pip install -q -r requirements.txt && exec python3 run_all.py --host server --port ${PORT:-8080} "$$@"
+      - bench
+    command: []
+
 volumes:
   ollama_models:
   dataset:
