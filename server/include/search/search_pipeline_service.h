@@ -6,6 +6,8 @@
 //     replaced under a tiny mutex (indexMutex_). A search copies the pointer
 //     and works on that snapshot, so searches never wait for a rebuild and
 //     there is no lock around searching itself.
+//   * Load shedding: at most kMaxConcurrentExpansions Ollama calls run at once;
+//     a query that finds all slots taken falls back without waiting.
 //   * One build at a time: an atomic flag; the loser gets 409.
 //   * WebSocket queries run on a CustomThreadPool owned by this class, never
 //     on Crow's I/O threads. Every connection has a WebSocketSession with a
@@ -148,6 +150,10 @@ class SearchPipelineService {
   ServiceStatus status() const;
   bool ollamaHealthy();
 
+  // docs/API.md §5.4: at most this many Ollama expansion calls run at once
+  // (REST and WebSocket together); further queries fall back immediately.
+  static constexpr int kMaxConcurrentExpansions = 8;
+
  private:
   std::shared_ptr<const InvertedIndex> snapshot() const;
   ExpansionStage expand(const SearchRequest& request,
@@ -169,6 +175,8 @@ class SearchPipelineService {
   std::shared_ptr<const InvertedIndex> servedIndex_;  // guarded by indexMutex_
   std::atomic<bool> building_{false};
   std::atomic<bool> stopping_{false};
+  // Expansion calls in flight (the limiter of §5.4); see ExpansionSlot.
+  mutable std::atomic<int> expansionsInFlight_{0};
 
   // Declared last: destroyed first, so draining tasks still see valid members.
   CustomThreadPool webSocketPool_;

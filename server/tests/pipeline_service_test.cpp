@@ -516,3 +516,142 @@ TEST(PipelineWebSocket, ServiceDestructionWithBusyAndQueuedSessions) {
   }  // must neither hang nor crash
   SUCCEED();
 }
+
+// --- expansion limiter (docs/API.md §5.4) and WebSocket fast path ------------
+
+namespace {
+template <typename Predicate>
+bool waitUntil(Predicate predicate, int ms = 5000) {
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (predicate()) return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return predicate();
+}
+}  // namespace
+
+TEST(ExpansionLimiter, AtMostEightInFlightAcrossRestAndWebSocket) {
+  TempDir dir;
+  writeDataset(dir);
+  FakeOllama fake;
+  fake.setModelAnswer(R"({"terms":["sea"]})");
+  fake.blockGenerate();
+  SearchPipelineService service(configFor(dir, fake.url(), 20000),
+                                {nullptr, nullptr, 8});
+  ASSERT_FALSE(service.buildIndex(1).error.has_value());
+
+  std::atomic<int> fallbacks{0};
+  std::atomic<int> llm{0};
+  std::vector<std::thread> restThreads;
+  for (int i = 0; i < 6; ++i) {
+    restThreads.emplace_back([&] {
+      auto outcome = service.performKeywordSearch(request("climate"));
+      const auto& response = std::get<SearchResponse>(outcome);
+      (response.expansion.source == search::ExpansionSource::kFallback
+           ? fallbacks
+           : llm)
+          .fetch_add(1);
+    });
+  }
+  Collector collectors[6];
+  std::shared_ptr<WebSocketSession> sessions[6];
+  for (int i = 0; i < 6; ++i) {
+    sessions[i] = collectors[i].makeSession();
+    service.handleWebSocketMessage(sessions[i], R"({"query":"climate"})",
+                                   false);
+  }
+  // Exactly 8 reach the fake; the other 4 shed load without waiting.
+  ASSERT_TRUE(waitUntil([&] { return fake.generateCalls() == 8; }));
+  int wsFallbacks = 0;
+  ASSERT_TRUE(waitUntil([&] {
+    wsFallbacks = 0;
+    for (auto& c : collectors) {
+      const auto messages = c.messages();
+      if (!messages.empty() && messages[0]["data"]["expansion"] == "fallback")
+        ++wsFallbacks;
+    }
+    return fallbacks.load() + wsFallbacks == 4;
+  }));
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  EXPECT_EQ(fake.generateCalls(), 8);
+
+  fake.release();
+  for (auto& t : restThreads) t.join();
+  for (auto& c : collectors) ASSERT_TRUE(c.waitFor(3));
+  EXPECT_EQ(llm.load() + fallbacks.load(), 6);
+
+  // Slots were returned: a new expansion reaches the fake again.
+  auto outcome = service.performKeywordSearch(request("climate"));
+  EXPECT_EQ(std::get<SearchResponse>(outcome).expansion.source,
+            search::ExpansionSource::kLlm);
+  EXPECT_EQ(fake.generateCalls(), 9);
+}
+
+TEST(ExpansionLimiter, TimeoutsReleaseSlots) {
+  TempDir dir;
+  writeDataset(dir);
+  FakeOllama fake;
+  fake.setModelAnswer(R"({"terms":["sea"]})");
+  fake.setDelayMs(500);  // longer than the 100 ms client timeout
+  SearchPipelineService service(configFor(dir, fake.url(), 100));
+  ASSERT_FALSE(service.buildIndex(1).error.has_value());
+  // 12 sequential timeouts would exhaust 8 slots if they leaked.
+  for (int i = 0; i < 12; ++i) {
+    auto outcome = service.performKeywordSearch(request("climate"));
+    ASSERT_TRUE(std::holds_alternative<SearchResponse>(outcome));
+    EXPECT_EQ(std::get<SearchResponse>(outcome).expansion.source,
+              search::ExpansionSource::kFallback);
+  }
+  EXPECT_EQ(fake.generateCalls(), 12);  // every call reached the fake
+}
+
+TEST(PipelineWebSocket, InvalidFrameOnIdleSessionBypassesBusyPool) {
+  TempDir dir;
+  writeDataset(dir);
+  FakeOllama fake;
+  fake.setModelAnswer(R"({"terms":["sea"]})");
+  fake.blockGenerate();
+  SearchPipelineService service(configFor(dir, fake.url(), 20000),
+                                {nullptr, nullptr, 1});  // one pool worker
+  ASSERT_FALSE(service.buildIndex(1).error.has_value());
+  Collector busy, idle;
+  auto busySession = busy.makeSession();
+  auto idleSession = idle.makeSession();
+  service.handleWebSocketMessage(busySession, R"({"query":"climate"})", false);
+  ASSERT_TRUE(waitUntil([&] { return fake.generateCalls() == 1; }));
+  // The only worker is blocked; the error must still arrive, synchronously.
+  service.handleWebSocketMessage(idleSession, "not json", false);
+  const auto messages = idle.messages();
+  ASSERT_EQ(messages.size(), 1u);
+  EXPECT_EQ(messages[0]["stage"], "error");
+  EXPECT_EQ(messages[0]["data"]["code"], "invalid_json");
+  service.handleWebSocketMessage(idleSession, "\x01\x02", true);
+  EXPECT_EQ(idle.messages().size(), 2u);
+  fake.release();
+  ASSERT_TRUE(busy.waitFor(3));
+}
+
+TEST(PipelineWebSocket, InvalidFrameBehindPendingQueryKeepsPosition) {
+  TempDir dir;
+  writeDataset(dir);
+  FakeOllama fake;
+  fake.setModelAnswer(R"({"terms":["sea"]})");
+  fake.blockGenerate();
+  SearchPipelineService service(configFor(dir, fake.url(), 20000),
+                                {nullptr, nullptr, 2});
+  ASSERT_FALSE(service.buildIndex(1).error.has_value());
+  Collector collector;
+  auto session = collector.makeSession();
+  service.handleWebSocketMessage(session, R"({"query":"climate"})", false);
+  ASSERT_TRUE(waitUntil([&] { return fake.generateCalls() == 1; }));
+  service.handleWebSocketMessage(session, "not json", false);
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  EXPECT_TRUE(collector.messages().empty());  // error waits behind the query
+  fake.release();
+  ASSERT_TRUE(collector.waitFor(4));
+  EXPECT_EQ(collector.stages(),
+            (std::vector<std::string>{"query_expansion", "keyword_search",
+                                      "done", "error"}));
+}

@@ -35,11 +35,48 @@ ApiError indexNotBuilt() {
                   "index is not built; call POST /api/index first"};
 }
 
+ApiError binaryFrameError() {
+  return ApiError{400, "invalid_json", "binary frames are not supported"};
+}
+
+// Error of a frame that would be rejected by validation, if any.
+std::optional<ApiError> validationError(const std::string& payload,
+                                        bool isBinary) {
+  if (isBinary) return binaryFrameError();
+  auto parsed = parseSearchRequest(payload, MessageSource::kWebSocketFrame);
+  if (auto* error = std::get_if<ApiError>(&parsed)) return std::move(*error);
+  return std::nullopt;
+}
+
 IndexBuildFunction defaultBuilder() {
   return [](const std::filesystem::path& path, int threads) {
     return IndexBuilder::buildIndex(path, threads);
   };
 }
+
+// RAII holder of one expansion slot (§5.4). Never waits.
+class ExpansionSlot {
+ public:
+  explicit ExpansionSlot(std::atomic<int>& counter) : counter_(counter) {
+    int current = counter_.load();
+    while (current < SearchPipelineService::kMaxConcurrentExpansions) {
+      if (counter_.compare_exchange_weak(current, current + 1)) {
+        held_ = true;
+        return;
+      }
+    }
+  }
+  ~ExpansionSlot() {
+    if (held_) counter_.fetch_sub(1);
+  }
+  ExpansionSlot(const ExpansionSlot&) = delete;
+  ExpansionSlot& operator=(const ExpansionSlot&) = delete;
+  bool held() const { return held_; }
+
+ private:
+  std::atomic<int>& counter_;
+  bool held_ = false;
+};
 
 }  // namespace
 
@@ -135,11 +172,13 @@ BuildResult SearchPipelineService::buildIndex(int threads) {
     }
     result.stats = outcome.stats;
     std::shared_ptr<const InvertedIndex> built = std::move(outcome.index);
+    std::shared_ptr<const InvertedIndex> old;
     {
       std::lock_guard<std::mutex> lock(indexMutex_);
-      servedIndex_ = std::move(built);  // atomic swap; old index stays alive
-                                        // for searches still using it
+      old = std::move(servedIndex_);  // atomic swap; the old index stays alive
+      servedIndex_ = std::move(built);  // for searches still using it
     }
+    old.reset();  // destroyed outside the lock (can take tens of ms)
   } catch (const std::exception&) {
     result.error = internalError();
   } catch (...) {
@@ -157,11 +196,15 @@ ExpansionStage SearchPipelineService::expand(
   const bool hasOriginalTokens = !originalQueryTokens(request.query).empty();
   if (!request.expand || !hasOriginalTokens) {
     stage.source = ExpansionSource::kDisabled;  // Ollama is not called
-  } else if (auto terms = ollama_->expandQuery(request.query)) {
-    llmTerms = std::move(*terms);
-    stage.source = ExpansionSource::kLlm;
   } else {
     stage.source = ExpansionSource::kFallback;
+    ExpansionSlot slot(expansionsInFlight_);
+    if (slot.held()) {  // otherwise: shed load, fall back at once
+      if (auto terms = ollama_->expandQuery(request.query)) {
+        llmTerms = std::move(*terms);
+        stage.source = ExpansionSource::kLlm;
+      }
+    }
   }
   weightedTerms = buildQueryTerms(request.query, llmTerms);
   stage.expandedTerms.reserve(weightedTerms.size());
@@ -251,6 +294,21 @@ void SearchPipelineService::performStreamingSearch(const SearchRequest& request,
 void SearchPipelineService::handleWebSocketMessage(
     const std::shared_ptr<WebSocketSession>& session, std::string payload,
     bool isBinary) {
+  // Fast path: an invalid frame on an idle session is answered right here.
+  // Frames of one connection arrive serially on its I/O thread and nothing is
+  // running or queued, so no other message of this session can be reordered.
+  bool idle = false;
+  {
+    std::lock_guard<std::mutex> lock(session->mutex_);
+    if (session->closed_) return;
+    idle = !session->draining_ && session->queue_.empty();
+  }
+  if (idle) {
+    if (auto error = validationError(payload, isBinary)) {
+      session->send(dumpJson(webSocketErrorJson(*error)));
+      return;
+    }
+  }
   bool schedule = false;
   {
     std::lock_guard<std::mutex> lock(session->mutex_);
@@ -312,8 +370,7 @@ void SearchPipelineService::processFrame(
     return session->send(text);
   };
   if (isBinary) {
-    send(dumpJson(webSocketErrorJson(
-        ApiError{400, "invalid_json", "binary frames are not supported"})));
+    send(dumpJson(webSocketErrorJson(binaryFrameError())));
     return;
   }
   auto parsed = parseSearchRequest(payload, MessageSource::kWebSocketFrame);

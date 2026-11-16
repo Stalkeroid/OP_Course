@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <string>
@@ -34,6 +35,10 @@ class FakeOllama {
         delay = delayMs_;
       }
       generateCalls_.fetch_add(1);
+      {
+        std::unique_lock<std::mutex> gate(gateMutex_);
+        gateCv_.wait(gate, [this] { return !blocked_; });
+      }
       if (delay > 0)
         std::this_thread::sleep_for(std::chrono::milliseconds(delay));
       res.status = status;
@@ -44,6 +49,7 @@ class FakeOllama {
     server_.wait_until_ready();
   }
   ~FakeOllama() {
+    release();
     server_.stop();
     if (thread_.joinable()) thread_.join();
   }
@@ -71,6 +77,18 @@ class FakeOllama {
     std::lock_guard<std::mutex> lock(mutex_);
     delayMs_ = ms;
   }
+  // Makes /api/generate block (after counting the call) until release().
+  void blockGenerate() {
+    std::lock_guard<std::mutex> lock(gateMutex_);
+    blocked_ = true;
+  }
+  void release() {
+    {
+      std::lock_guard<std::mutex> lock(gateMutex_);
+      blocked_ = false;
+    }
+    gateCv_.notify_all();
+  }
   std::string lastRequest() {
     std::lock_guard<std::mutex> lock(mutex_);
     return lastRequest_;
@@ -90,6 +108,9 @@ class FakeOllama {
   int generateStatus_ = 200;
   int delayMs_ = 0;
   std::atomic<int> generateCalls_{0};
+  std::mutex gateMutex_;
+  std::condition_variable gateCv_;
+  bool blocked_ = false;
 };
 
 inline std::string FakeOllama::wrap(const std::string& modelAnswer) {
