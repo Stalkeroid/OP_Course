@@ -61,7 +61,7 @@ Compose services: `server`, `ollama`, `ollama-init` (one-shot), `dataset-init`
   host: the server is built, and the dataset is generated, inside containers.
 - Network access on the first start (base images, C++ dependencies fetched by CMake,
   the Ollama model).
-- Disk (estimate): the dataset volume is about 2.1 GB, plus the Ollama model, plus
+- Disk (estimate): the dataset volume is 2100 MiB (about 2.2 GB), plus the Ollama model, plus
   Docker images and the build cache; keep roughly 8 GB free.
 - RAM: with the full dataset the server holds about 390 MB after an index build
   and peaks at about 770 MB during a rebuild, because the old and the new index
@@ -88,7 +88,7 @@ What happens on the first start:
    works immediately with fallback expansion and switches to LLM expansion when the
    model is available. If the pull fails (offline), only a warning is printed.
 3. `dataset-init` runs `dataset/generate.py` into the `dataset` volume: 20 000
-   documents, about 2.1 GB, seed 42. It skips generation when the volume already
+   documents, 2100 MiB (about 2.2 GB), seed 42. It skips generation when the volume already
    holds a dataset with the same size, document count and seed. Generation time is
    not measured here; it depends on CPU cores and disk (the script uses all cores and
    prints progress).
@@ -139,7 +139,8 @@ Details and measurements: [`docs/API.md`](docs/API.md) section 2.5.
   and 1 at a time).
 - L1: a connection that the HTTP library binds to such an occupied I/O thread waits
   until that operation ends, so one `GET /api/health` or `GET /api/stats` can be slow
-  (up to 15 s by default, or the build duration), while the others answer in
+  (up to `OLLAMA_TIMEOUT_MS` plus up to 2 s for the health check, about 17 s with
+  defaults, or the build duration plus up to 2 s), while the others answer in
   milliseconds. A client that polls health should use a timeout and retry on a new
   connection.
 - L2: the same wait applies to any other request or WebSocket connection on that
@@ -153,7 +154,7 @@ Details and measurements: [`docs/API.md`](docs/API.md) section 2.5.
 | Docker volume | `dataset` (the real name is prefixed by the Compose project name, see `docker volume ls`) |
 | Format | one UTF-8 file ending in `.txt` per document, in 16 topic folders: `<topic>/doc_NNNNNN.txt` |
 | `doc_id` | path relative to the dataset root, `/` separators, e.g. `cooking/doc_000963.txt` |
-| Default size | 20 000 documents, about 2.1 GB (the assignment asks for >= 10 000 documents and >= 1 GB) |
+| Default size | 20 000 documents, 2100 MiB (about 2.2 GB) (the assignment asks for >= 10 000 documents and states both >= 2 GB and >= 1 GB; the default satisfies both) |
 
 Generator: `dataset/generate.py` (Python standard library only, deterministic for a
 given seed). Text is made of English-like words from `dataset/vocab/` (16 topics plus

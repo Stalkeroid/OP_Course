@@ -74,9 +74,12 @@ Field classification used in every table below:
 - Servers MUST NOT require authentication. No CORS headers are sent (the Web UI is served
   from the same origin, see §13).
 - All requests are processed concurrently (Crow multithreaded mode; how requests map to
-  threads, and the latency limitation that follows from it, is in §2.5). Searches never
-  wait for an index rebuild (see §7.4). At most 8 searches at a time wait on Ollama;
-  further searches skip expansion instead of waiting (§5.4).
+  threads, and the latency limitations that follow from it, are in §2.5). Searches are
+  never blocked by the index rebuild itself: they keep using the previous index
+  snapshot (§7.4). A search whose connection is bound to the I/O thread that runs the
+  build still waits for that thread (known limitation L2, §2.5). At most 8 expansion
+  calls to Ollama are in flight at a time; a search whose handler starts while 8 are in
+  flight skips expansion instead of waiting (§5.4).
 - Supported methods are `GET` and `POST` (one per `/api/*` path, see §1). The
   `HEAD` method is **not supported**: the response to a `HEAD` request on any path is
   produced by the HTTP library (currently `404` with a short non-JSON body) and is
@@ -134,17 +137,36 @@ then clamped to `[0.000001, 1.0]`. The top result always has `score` `1.0`.
   `GET /api/stats` answer within 3 seconds whenever their connection is bound to an I/O
   thread that is not occupied by one of the two long operations above. This is the
   normal case. A connection that the HTTP library happens to bind to an occupied thread
-  waits until that operation ends: up to `OLLAMA_TIMEOUT_MS` (15 s by default) behind
-  an expansion call, the full build duration behind `POST /api/index`. Measured: with
-  Ollama hanging on every endpoint, 16 concurrent searches and 24 concurrent health
-  requests, one health request waited about 16 s while the others answered in
-  milliseconds; with Ollama answering `/api/tags`, 40 concurrent health requests took at
-  most 0.01 s while 16 searches waited on `/api/generate`.
+  first waits until the long operation(s) already queued ahead of it on that thread end
+  (normally one), and then its own handler runs. The total is therefore:
+  - behind an expansion call: up to `OLLAMA_TIMEOUT_MS` plus the rest of that search
+    (its keyword search), plus the request's own handler time — at most about 2 s more
+    for a health request that has to run the Ollama check because the cached result
+    expired (§6.2); about 17 s with the defaults;
+  - behind `POST /api/index`: the remaining build duration plus, for health, up to 2 s.
+
+  `GET /api/stats` adds no Ollama check of its own. Measured: with Ollama hanging on
+  every endpoint, 16 concurrent searches and 24 concurrent health requests, one health
+  request took 16.998 s (about 15 s queued behind a search plus its own 2 s Ollama
+  check) while the others answered in milliseconds; with Ollama answering `/api/tags`,
+  40 concurrent health requests took at most 0.01 s while 16 searches waited on
+  `/api/generate`.
 - **L2 — other requests on such a connection.** The same wait applies to any request on
-  a connection bound to an occupied thread (static files, non-expanded searches,
-  `404`/`405` answers), and to WebSocket connections bound to it: their frames are read
-  and their messages written on that I/O thread, so the fast error path of §10.1 and
-  the delivery of stage messages are delayed in the same way.
+  a connection bound to an occupied thread (static files, searches with or without
+  expansion, `404`/`405` answers), and to WebSocket connections bound to it: their
+  frames are read and their messages written on that I/O thread, so the fast error path
+  of §10.1 and the delivery of stage messages are delayed in the same way. Two
+  consequences for searches:
+  - a search bound to the thread running `POST /api/index` waits for the build to end
+    although the old index could serve it (measured once: 2.8 s during a 3.1 s build,
+    other searches ≤ 0.011 s);
+  - a search bound to a thread occupied by an expansion call starts its handler only
+    after that call ends. If a slot is free by then, it makes its own expansion call, so
+    it can take about 2 × `OLLAMA_TIMEOUT_MS` in total, and the number of
+    `/api/generate` calls Ollama receives for a burst of searches can exceed 8 (never
+    more than 8 **at the same time**, §5.4). Measured with 16 concurrent searches and a
+    hanging `/api/generate`, 10 runs: 7 runs gave 8 fast responses / 8 slow / 8 calls,
+    3 runs gave 7 fast / 9 slow / 9 calls with one search taking 30 s.
 - Recommendation for clients (non-normative): a client that polls health should use a
   per-request timeout and retry on a new connection rather than treat one slow answer
   as a failure.
@@ -368,6 +390,11 @@ calls (`POST {OLLAMA_URL}/api/generate`) at the same time, counted across
 Rules:
 
 - This is load shedding, **not an error**: HTTP 200 / normal WS sequence, no error code.
+- The slot check happens when the query's handler (REST) or pool task (WS) starts, not
+  when the request arrives at the socket. The invariant is "never more than 8 calls in
+  flight at the same moment"; the **total** number of calls for a burst of queries is
+  not bounded by 8 (a REST search delayed by known limitation L2, §2.5, may find a free
+  slot and call Ollama after earlier calls ended).
 - Queries with `expansion` = `"disabled"` never take a slot. The health probe
   (`GET {OLLAMA_URL}/api/tags`, §6.2) is not an expansion call and is not counted.
 - Reason: an expansion call blocks the thread that runs it (the HTTP I/O thread of a
@@ -376,7 +403,7 @@ Rules:
   most 8 threads are ever blocked on Ollama, out of at least 16 I/O threads and at
   least 16 WS pool workers, so health, stats, index and non-expanded searches keep
   being served on the threads that are not blocked. Requests on a connection bound to
-  a blocked I/O thread wait until that call ends (known limitation, §2.5).
+  a blocked I/O thread wait until that call ends (known limitations L1 and L2, §2.5).
 
 ---
 
@@ -409,14 +436,25 @@ Rules:
   is bound to an HTTP I/O thread that is not occupied by a long-running
   `POST /api/search` expansion or `POST /api/index` build (§2.5). This is the normal
   case: at most 9 of at least 16 I/O threads can be occupied. A connection bound to an
-  occupied thread waits until that operation ends (known limitation L1, §2.5).
+  occupied thread waits until that operation ends, and then its own handler runs
+  (known limitation L1, §2.5: up to `OLLAMA_TIMEOUT_MS` plus about 2 s).
   `GET /api/stats` has the same bound under the same condition (§9.2).
-- The Ollama check result MAY be cached for at most 5 seconds.
-- At most one Ollama check runs at a time. A health request that arrives while a check
-  is in progress does not start another one and does not wait for it: it answers at
-  once with the last known result (`false` if no check has completed yet). So health
-  requests never wait for each other's checks, under any number of concurrent health
-  requests, also when Ollama hangs on every endpoint.
+- **Ollama check and its result (cache + single check).** The server keeps the result
+  of the last *completed* Ollama check and the time it completed. When the health
+  handler runs:
+  1. if a completed result exists and is less than 5 seconds old, it is returned;
+  2. otherwise, if a check is already in progress (started by another health request),
+     the handler does not start another one and does not wait for it: it returns the
+     last completed result at once (`false` if no check has completed yet);
+  3. otherwise this request runs the check (up to 2000 ms), stores and returns its
+     result.
+
+  Consequences: at most one Ollama check runs at a time, and health requests never
+  wait for each other's checks, under any number of concurrent health requests, also
+  when Ollama hangs on every endpoint. The returned `ollama` value is fresh (< 5 s)
+  except in case 2, where it can be older: up to the 5 s cache age plus the running
+  check's duration, i.e. about 7 seconds when measured at the time the handler runs
+  (more, measured from the client, if the request itself was delayed by L1).
 
 ### 6.3 Example
 
@@ -635,8 +673,10 @@ Rules:
 - Never contacts Ollama and never waits on anything external. Answered within 3 seconds
   whenever its connection is bound to an HTTP I/O thread that is not occupied by a
   long-running expansion or build, also when Ollama hangs and many searches are waiting
-  on it; a connection bound to an occupied thread waits until that operation ends
-  (same condition as §6.2, known limitation L1 in §2.5).
+  on it; a connection bound to an occupied thread waits until that operation ends —
+  up to `OLLAMA_TIMEOUT_MS` behind an expansion call, the remaining build duration
+  behind a build — and then answers at once (same condition as §6.2, known limitation
+  L1 in §2.5; stats runs no Ollama check, so the extra 2 s of health does not apply).
 - During a rebuild the values describe the **previous** (still served) index; they change
   only when the new index is swapped in.
 
@@ -672,7 +712,8 @@ Streams the pipeline stages of a search, one JSON text message per stage
   separate from the HTTP workers. At most one query per connection runs at a time
   (rule above), so:
   - while fewer queries than the pool size are running, different connections are
-    processed concurrently and independently;
+    processed concurrently and independently (reading their frames and writing their
+    messages still happens on each connection's I/O thread, subject to L2, §2.5);
   - when all workers are busy, further queries (from any connection) wait and are
     started in arrival order — precisely, in the order in which they became ready to
     run, a query being ready once it has arrived and every earlier query of its own
@@ -826,7 +867,7 @@ ends the session because the server never closes the connection itself.)
 |---|---|
 | Location in the server container | `/data/dataset`, mounted **read-only** from a Docker volume |
 | Env var | `DATASET_PATH` (default `/data/dataset`); `POST /api/index` always indexes this directory |
-| Size requirements (assignment) | ≥ 10 000 English documents, ≥ 1 GB total |
+| Size requirements (assignment) | ≥ 10 000 English documents; total size: the assignment states ≥ 2 GB in one place and ≥ 1 GB in another. The default generated dataset (`DATASET_SIZE_MB=2100`, 20 000 documents: 2100 MiB of text, about 2.2 GB on disk) satisfies both |
 | Document | one regular file whose name ends in `.txt` (lowercase, case-sensitive) = one document |
 | Encoding | UTF-8 (invalid sequences tolerated: they act as separators during tokenisation and become U+FFFD in snippets) |
 | Discovery | recursive traversal of `DATASET_PATH` (`std::filesystem::recursive_directory_iterator`); symbolic links are **not** followed; hidden files/directories are included; files with any other extension are ignored |
@@ -874,18 +915,31 @@ A verifier walks through these in order against a freshly started stack
 (`docker compose up`). "Shape" means: exactly the listed mandatory fields with the
 listed JSON types, plus only the listed extension fields. Items 2a, 22a, 22b and 27a
 need a stand-in Ollama at `OLLAMA_URL` that answers `/api/tags` normally and accepts
-`/api/generate` but never replies (a "hanging Ollama"). The known limitations of §2.5
-are documented behaviour, not checklist items.
+`/api/generate` but never replies (a "hanging Ollama"); the fake should record each
+`/api/generate` call and the number in flight. The known limitations of §2.5 are
+documented behaviour, not checklist items: where they can change what a client
+observes, the item states which outcomes are expected.
 
 **Health**
 1. `GET /api/health` → 200, shape `{status:"ok", ollama:bool, index_ready:bool, indexing:bool}`.
 2. With Ollama stopped (`docker compose stop ollama`) → still 200, `ollama: false`, answered within 3 s.
 2a. (Run after item 6, index built.) With a hanging Ollama (answers `/api/tags`
     normally, never replies to `/api/generate`), start 16 concurrent
-    `POST /api/search {"query":"<common word>"}` requests; while 8 of them are still
+    `POST /api/search {"query":"<common word>"}` requests; while some of them are still
     waiting on Ollama (§5.4), send 20 `GET /api/health` and 20 `GET /api/stats`
-    requests concurrently, each on a new connection → every one answers 200 within
-    3 s (§6.2, §9.2).
+    requests concurrently, each on a new connection, with a client timeout of at least
+    3 × `OLLAMA_TIMEOUT_MS` (L2 can chain waits). Record each request's completion time and the
+    completion times of the slow searches. Pass if all of:
+    - every health and stats request answers 200 with the shape of items 1 / 3;
+    - at least one health request and at least one stats request answer within 3 s;
+    - every request that took longer than 3 s completed within 3 s after one of the
+      slow searches completed (it was queued behind that search on its I/O thread,
+      known limitation L1, §2.5 — documented behaviour, not a violation).
+
+    Expected normal outcome: all 40 answer within 3 s (5 of 5 runs in the final
+    verification). A health or stats request that is slow without any search completing
+    shortly before it is a failure (it would mean the handler itself waits on Ollama
+    or on the searches).
 
 **Before indexing**
 3. `GET /api/stats` → 200, `documents`, `index_build_time_ms`, `threads_used` all `0`, `index_ready: false`.
@@ -907,20 +961,45 @@ are documented behaviour, not checklist items.
 15. First result `score` = 1.0; all scores in (0, 1]; order is score desc, ties by `doc_id` asc.
 16. `expanded_terms` begins with the query's own tokens (§4.2); with Ollama stopped, `expanded_terms` = query tokens exactly and `expansion: "fallback"`, still 200.
 17. `{"query":"x","expand":false}` → `expansion: "disabled"`; mode omitted is accepted.
-18. `{"query":"zzqxjv"}` (no match) → 200 `results: []`.
+18. `{"query":"zzqxjv","expand":false}` (no match) → 200 `results: []`,
+    `total_matches: 0`. (With expansion on, LLM-added terms may match other documents,
+    so a non-empty result is then not a failure.)
 19. `{"query":"the of"}` → 200 `results: []`, `expanded_terms: []`, `expansion: "disabled"`.
 20. `{"query":""}` / `{"query":"   "}` → 400 `empty_query`; `{}` / `{"query":5}` → 400 `invalid_query`; `{"query":"a","mode":"semantic"}` → 400 `invalid_mode`; `{"query":"a","limit":0}` / `101` → 400 `invalid_limit`; `{"query":"a","expand":"no"}` → 400 `invalid_expand`.
 21. `limit: 100` returns at most 100 results; snippets contain no `\n`/`\t`, are ≤ 206 code points, valid UTF-8, contain a query term (case-insensitive) unless `""`.
 22. A search issued during a running rebuild returns 200 (served by the old index).
-22a. Expansion bound (§5.4): with an Ollama that accepts connections but never answers
-     (index built), send 16 concurrent `POST /api/search {"query":"<common word>"}` →
-     exactly 8 return at once (well under 1 s) with 200, `expansion: "fallback"` and
-     `expanded_terms` = query tokens; the other 8 return 200 `expansion: "fallback"`
-     only after `OLLAMA_TIMEOUT_MS`. The fake Ollama receives exactly 8
-     `/api/generate` calls. Afterwards (Ollama answering normally) a new search gets
-     `expansion: "llm"` again (slots were released).
-22b. The bound is shared: with 8 WS queries waiting on the hanging Ollama, a
-     `POST /api/search` needing expansion returns at once with `expansion: "fallback"`.
+    Usually it answers at once; one whose connection is bound to the build's I/O thread
+    answers only after the build ends (L2, §2.5) — still 200, not a failure.
+22a. Expansion bound (§5.4): with a hanging Ollama (index built, no other request in
+     flight), send 16 concurrent `POST /api/search {"query":"<common word>"}`, each on
+     its own connection, with a client timeout of at least 3 × `OLLAMA_TIMEOUT_MS`.
+     Let the fake count `/api/generate` calls and the maximum number in flight at once.
+     Pass if all of:
+     - at no moment are more than 8 `/api/generate` calls in flight at the fake, and
+       it receives at least 8 calls in total;
+     - every one of the 16 requests returns 200 with `expansion: "fallback"` and
+       `expanded_terms` = the query tokens;
+     - no request waits for Ollama without having called it: a request whose handler
+       starts while 8 calls are in flight returns at once. Observable as: every
+       response time (from the start of the burst) lies within 1 s of
+       k × `OLLAMA_TIMEOUT_MS` for some integer k ≥ 0 (k = 0: fast; k = 1: its own
+       call timed out, or it queued behind one; k ≥ 2: L2 chaining), and
+       (number of responses with k = 0) + (total `/api/generate` calls) ≤ 16;
+     - afterwards, with Ollama answering normally, a new search gets
+       `expansion: "llm"` (slots were released).
+
+     Expected counts: usually 8 fast / 8 slow / 8 calls. Because of known limitation L2
+     (§2.5), a request whose connection shares an I/O thread with a waiting search
+     starts only after that search ends and may then take a freed slot, giving e.g.
+     7 fast / 9 slow / 9 calls with one request taking about 2 × `OLLAMA_TIMEOUT_MS`.
+     Such counts are expected behaviour, not a failure.
+22b. The bound is shared: with a hanging Ollama, no REST search in flight, open 8 WS
+     connections that each send one expanding query and wait until the fake reports
+     8 `/api/generate` calls in flight; then a `POST /api/search` needing expansion,
+     on a new connection, returns at once (well under 1 s) with
+     `expansion: "fallback"`, and the fake still has at most 8 calls in flight. (WS
+     queries run on the WS pool, not on I/O threads, so L2 does not delay this
+     request.)
 
 **WebSocket**
 23. Send `{"query":"climate change"}` → exactly three messages in order `query_expansion`, `keyword_search`, `done`; `done` is exactly `{"stage":"done"}`.
@@ -928,12 +1007,18 @@ are documented behaviour, not checklist items.
 25. Send two queries back-to-back on one connection → two complete, non-interleaved sequences in order.
 26. Send `not json` → `error` / `invalid_json`; then a valid query on the same connection → full sequence.
 27. Send `{"query":""}` → single `error` / `empty_query`, no `done`.
-27a. Fast error path (§10.1): with a hanging Ollama (index built), open 16 connections
-     that each send one expanding query; exactly 8 of them receive their full sequence
-     at once with `expansion: "fallback"` (§5.4), the other 8 stay blocked until
-     `OLLAMA_TIMEOUT_MS`. Meanwhile a 17th connection sending `not json` gets
-     `error` / `invalid_json` within 1 s. (Full pool saturation, which a hanging
-     Ollama alone can no longer cause, is covered by the service unit tests.)
+27a. Fast error path (§10.1): with a hanging Ollama (index built, **no REST request in
+     flight**, earlier expansion calls ended), open 16 connections that each send one
+     expanding query. WS queries run on the WS pool (≥ 16 workers) and no I/O thread
+     is occupied by a long REST operation, so L2 (§2.5) does not apply here and the
+     counts are exact: 8 connections receive their full sequence at once with
+     `expansion: "fallback"` (§5.4), the other 8 receive theirs (also `"fallback"`)
+     only after `OLLAMA_TIMEOUT_MS`; the fake receives 8 `/api/generate` calls and
+     never more than 8 at once. Meanwhile a 17th connection sending `not json` gets
+     `error` / `invalid_json` within 1 s. If REST searches are waiting on Ollama at
+     the same time, only the weaker assertions of item 22a hold. (Full pool
+     saturation, which a hanging Ollama alone can no longer cause, is covered by the
+     service unit tests.)
 27b. On one connection, send a valid query immediately followed by `not json` → the
      complete sequence of the first query, then `error` / `invalid_json` (FIFO
      position kept, no interleaving).

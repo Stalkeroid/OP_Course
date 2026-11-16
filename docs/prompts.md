@@ -1640,4 +1640,119 @@ achieve); the list of wrong claims found in the documents with file and line;
 and the final list of what a human must still check on a real machine.
 ```
 
-Outcome: pending
+Outcome: accepted (60 pass, 1 fail, 6 risks, all of them wording in docs/API.md or the documents; no code defect; routed to prompts 20 and 21)
+
+### 20. api-contract — final wording fixes
+Date: 2026-11-16
+Model: opus
+Prompt:
+
+```
+Repository: /home/claude/op_course. English only. Your role file was loaded as
+your system prompt. Edit docs/API.md only. No shape, field, code or default
+changes — wording and checklist only.
+
+The final independent verification found the server correct but the contract
+text inconsistent with its own section 2.5 in these places. Fix each:
+
+1. Checklist 22a asserts "exactly 8 return at once ... the fake receives
+   exactly 8 /api/generate calls". Measured over 10 runs of 16 concurrent
+   searches with a fake hanging on /api/generate: 7 runs gave 8 fast / 8 slow /
+   8 calls; 3 runs gave 7 fast / 9 slow / 9 calls and one search took 30 s at
+   the client. Cause: limitation L2 — a connection bound to an I/O thread that
+   is busy with a waiting search queues behind it, and when its handler finally
+   runs a slot has been freed, so it makes its own expansion call. Reword 22a
+   so that it asserts only what always holds (at no moment more than 8
+   /api/generate calls are in flight at the fake; every request returns 200
+   with expansion "fallback"; requests whose handler starts while 8 are in
+   flight return without waiting; afterwards slots are free again and "llm"
+   returns) and mention the L2 effect on the counts as expected behaviour.
+   Check 22b, 27a, 27b for the same over-assertion.
+2. Checklist 2a asserts "every one answers 200 within 3 s" while section 2.5
+   L1 says a connection on an occupied thread can wait. It passed 5 of 5 runs
+   here, but make the item consistent with L1 (e.g. state the expectation and
+   that a single request delayed by L1 is not a contract violation, or make
+   the item sequential/with retry) — choose the wording that keeps the item
+   meaningful and never falsely fails.
+3. L1 in section 2.5 (and anywhere it is repeated) says the wait is up to
+   OLLAMA_TIMEOUT_MS. Measured: 16.998 s = 15 s queued + the request's own
+   2 s Ollama check because the cache had expired. State the bound as
+   OLLAMA_TIMEOUT_MS plus up to 2 s for health (and the build duration plus up
+   to 2 s when the thread runs a build).
+4. Section 2.1 says "Searches never wait for an index rebuild". Under L2 a
+   search on a connection bound to the building request's I/O thread waits
+   (measured once: 2.8 s during a 3.1 s build; the others <= 0.011 s). Qualify
+   the sentence: searches are never blocked by the index itself (they use the
+   previous snapshot), subject to L2.
+5. Section 6.2: "cached for at most 5 seconds" conflicts with the single-check
+   rule, under which a health request answering during a running check returns
+   the last known result, which can be older than 5 s (up to about 7 s, or the
+   L1 wait). Reconcile the two rules.
+6. Checklist 18 ({"query":"zzqxjv"} -> results []) is only deterministic
+   without LLM terms: specify "expand": false (and keep a note that with
+   expansion on, LLM-added terms may match).
+7. Dataset size: the assignment states both ">= 2 GB" and ">= 1 GB" in
+   different places; section 11 cites only 1 GB. Cite both and say the default
+   generated dataset (DATASET_SIZE_MB=2100, about 2.2 GB on disk) satisfies
+   both.
+Then re-read sections 2.1, 2.5, 5.4, 6.2, 9.2, 10.1, 14 once more for any
+other sentence that still promises more than 2.5 allows.
+
+Report back: each numbered item with the new text of the changed rule or
+checklist item, plus anything else you changed.
+```
+
+Outcome: accepted (wording and checklist items only; no shape, field, code or default changed)
+
+### 21. docs-writer — final corrections from verification
+Date: 2026-11-16
+Model: sonnet
+Prompt:
+
+```
+Repository: /home/claude/op_course. Your role file was loaded as your system
+prompt. English for README.md, docs/uml/README.md, bench/*.md; Ukrainian for
+docs/report/*. Do not edit docs/API.md (another agent is editing it now),
+docs/prompts.md or code. Check every item in the code before changing text.
+
+The final verification sampled 39 factual claims in the documents; 33 were
+right. Fix the wrong ones and their repetitions elsewhere:
+
+1. docs/uml/README.md (class diagram, PostingArena): it shows a member
+   `-SlabDeleter slabDeleter`, which does not exist. SlabDeleter is the deleter
+   type of the member `slabs` (server/include/search/inverted_index.h); show
+   `slabs` with its real type and drop the invented member. Re-check the other
+   members of that class against the header while you are there.
+2. docs/uml/README.md (build-index sequence) and
+   docs/report/explanatory-note.md section 3.5 (step list): setBuildInfo is
+   shown before the zero-documents check. In server/src/index_builder.cpp the
+   order is finalize() -> dataset_empty check -> setBuildInfo. Correct both.
+3. Known limitation L1 wait time: README.md "Known limitations" /
+   troubleshooting and the note say "up to 15 s" (OLLAMA_TIMEOUT_MS). Measured
+   16.998 s: 15 s queued behind the waiting search plus the health request's
+   own 2 s Ollama check, because the cached result had expired. Say
+   "OLLAMA_TIMEOUT_MS plus up to 2 s (about 17 s with defaults)" wherever the
+   bound is stated (README.md, note 3.x/4.7, bench/ANALYSIS.md if present).
+4. bench/ANALYSIS.md lines 3-4 say the file contains no measured numbers, and
+   docs/report/explanatory-note.md repeats that claim about the file, but the
+   file now quotes "about 14%" for the rejected request-pool design. Make the
+   statement true: either say "no results of the coursework benchmark; one
+   development-time figure is quoted and labelled as such", or remove the
+   figure from ANALYSIS.md and refer to the note. Keep it consistent in both
+   places.
+5. Dataset size wording: the generator writes size-mb x 1 MiB of text, so the
+   default 2100 gives about 2.2 GB (decimal) on disk; documents say
+   "about 2.1 GB" in several places and "2,2 ГБ" in one. Use one consistent
+   phrasing everywhere (README.md, bench/README.md, dataset/README.md, the
+   note): "2100 MiB (about 2.2 GB)". Where the assignment's requirement is
+   cited, mention both figures it gives (">= 2 GB" and ">= 1 GB").
+6. Appendix A of the note: add rows 19-21 from docs/prompts.md (headings and
+   "Outcome:" lines; row 21 is this task: "final corrections from
+   verification").
+Do NOT run git add / git commit / git push.
+
+REPORT BACK (concise, English): each numbered item, files and what changed;
+anything you found wrong in addition and fixed; anything you could not verify.
+```
+
+Outcome: accepted (six inaccurate claims corrected; Mermaid diagrams were not re-rendered after the edit)

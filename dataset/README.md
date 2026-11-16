@@ -4,6 +4,9 @@ Deterministic generator of an English-like corpus (standard library only).
 
     python3 dataset/generate.py --out DIR --size-mb 2100 --docs 20000 --seed 42
 
+The generator writes size-mb x 1 MiB of text, so the default 2100 is 2100 MiB (about
+2.2 GB on disk), which satisfies both figures in the assignment (>= 2 GB and >= 1 GB).
+
 Output: `DIR/<topic>/doc_NNNNNN.txt` (16 everyday topics, UTF-8), so a `doc_id` looks
 like `science/doc_000123.txt`. The marker file `DIR/.complete` (JSON with size, docs,
 seed) is written last. With `--if-needed` the script exits at once if the marker

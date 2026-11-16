@@ -1,7 +1,8 @@
 # Bottleneck analysis (draft)
 
 This file explains the shape of the curves qualitatively. It contains no
-measured numbers on purpose: all numbers are in `results/REPORT.md` and the
+results of the coursework benchmark on purpose (one development-time figure is
+quoted in section 5 and labelled as such): all benchmark numbers are in `results/REPORT.md` and the
 charts in `charts/`. Passages marked **[TO COMPLETE]** must be filled in by the
 student after the local run, together with the hardware description.
 
@@ -30,7 +31,8 @@ threads) but shares the same index.
 
 Known limitation L1 (API.md 2.5): a request whose connection is bound to an I/O
 thread that is busy with an expansion call or an index build waits until that
-operation ends. Keep this in mind when you read latency outliers: a single very
+operation ends (up to `OLLAMA_TIMEOUT_MS` plus up to 2 s for the health check,
+about 17 s with defaults; for a build, its duration plus up to 2 s). Keep this in mind when you read latency outliers: a single very
 slow health, stats or search request, while the median is normal, can be this
 effect and not a sign of server saturation.
 
@@ -54,7 +56,7 @@ Candidate causes in this implementation, with the evidence to look for in
 
 1. **Serial part on the coordinating thread.** Directory traversal and task
    submission are sequential. With 20 000 files this is small compared with
-   reading and tokenising 2 GB, but it is a constant that appears as a
+   reading and tokenising 2100 MiB, but it is a constant that appears as a
    non-zero e(p) already at p = 2 and caps the speedup at about 1/e. The final
    `finalize()` step and pool start-up / shutdown are also not parallel in the
    same way.

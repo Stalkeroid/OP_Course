@@ -80,7 +80,8 @@ README. Never let code drift from the document.
   `search_cli`, `core_tests`, `service_tests`.
   One root `Dockerfile` (multi-stage); runtime image has `/app/search_server`,
   `/app/search_cli`, `/app/web`.
-- Dataset: generated, ~2.1 GB, >= 10 000 documents (assignment says >= 2 GB).
+- Dataset: generated, 2100 MiB (about 2.2 GB), 20 000 documents (the assignment
+  says >= 2 GB in one place and >= 1 GB in another; this satisfies both).
 - User decisions on the contract (2026-11-16): no auto-index on startup (search
   before the first build returns 503), no stemming.
 

@@ -7,7 +7,7 @@ bottleneck discussion is in [ANALYSIS.md](ANALYSIS.md).
 
 ## Prerequisites
 
-The stack must be running with the full dataset (2.1 GB, 20 000 documents) and
+The stack must be running with the full dataset (2100 MiB, about 2.2 GB, 20 000 documents) and
 Ollama, then wait until `GET /api/health` answers and Ollama has pulled the model
 (`"ollama": true` in `/api/health`; otherwise the expansion run is labelled
 `OLLAMA-NOT-READY(fallback)` and measures the fallback path only).
@@ -53,7 +53,7 @@ sees (`os.cpu_count()`, the host count unless you set a CPU limit).
 `bench/plot.py` and `bench/report.py` can be run alone to redraw charts / the
 report from existing CSVs (`--results DIR`, `--charts DIR`).
 
-## Expected duration (full run, 2.1 GB dataset)
+## Expected duration (full run, 2100 MiB / about 2.2 GB dataset)
 
 Estimates only, not measured here: one index build takes tens of seconds to a few
 minutes depending on disk and threads, and the run does 1 + 3 x (number of thread

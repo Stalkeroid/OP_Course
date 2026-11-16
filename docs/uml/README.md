@@ -159,7 +159,8 @@ classDiagram
 
   class PostingArena {
     +allocateChunk(capacity) uint32
-    -SlabDeleter slabDeleter
+    -vector~unique_ptr~Posting, SlabDeleter~~ slabs
+    -uint32 usedInLastSlab
   }
 
   class memory_release {
@@ -468,12 +469,13 @@ sequenceDiagram
       Bld->>Pool: waitAll() (rethrows the first task exception)
       Bld->>Pool: shutdown()
       Bld->>Bld: releaseFreeHeapMemory() (workers have exited)
-      Bld->>Idx: finalize(), setBuildInfo(timeMs, threads, filesSkipped)
+      Bld->>Idx: finalize()
       alt zero readable documents
         Bld-->>Svc: BuildError dataset_empty
         Svc-->>API: ApiError (old index stays)
         API-->>Admin: 500 dataset_empty
       else success
+        Bld->>Idx: setBuildInfo(timeMs, threads, filesSkipped)
         Bld-->>Svc: BuildOutcome(index, stats)
         Svc->>Svc: old = servedIndex_; servedIndex_ = new index (swap under indexMutex_)
         Note over Svc: searches that started earlier finish on the old index
