@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Parallel Search Engine</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <h1>Parallel Search Engine</h1>
+  <p class="sub">Inverted index with LLM query expansion</p>
+</header>
+
+<main>
+  <section class="card" aria-labelledby="search-h">
+    <h2 id="search-h">Search</h2>
+    <form id="search-form" autocomplete="off">
+      <div class="row">
+        <label class="grow">
+          <span class="lbl">Query</span>
+          <input id="query" type="text" maxlength="1000" required placeholder="e.g. recipe oven">
+        </label>
+        <label class="narrow">
+          <span class="lbl">Limit</span>
+          <input id="limit" type="number" min="1" max="100" value="10" step="1">
+        </label>
+      </div>
+      <div class="row between">
+        <label class="check"><input id="expand" type="checkbox" checked> Use LLM expansion</label>
+        <button id="search-btn" type="submit" class="primary">Search</button>
+      </div>
+    </form>
+    <p id="search-error" class="msg error" role="alert" hidden></p>
+    <p id="ws-state" class="muted small" aria-live="polite">WebSocket: not connected</p>
+  </section>
+
+  <section class="card" aria-labelledby="pipe-h">
+    <h2 id="pipe-h">Pipeline</h2>
+    <ol id="pipeline" class="steps">
+      <li class="step pending" data-stage="query_expansion">
+        <span class="dot" aria-hidden="true"></span>
+        <span class="name">Query expansion</span>
+        <span class="state">pending</span>
+        <span class="time"></span>
+      </li>
+      <li class="step pending" data-stage="keyword_search">
+        <span class="dot" aria-hidden="true"></span>
+        <span class="name">Keyword search</span>
+        <span class="state">pending</span>
+        <span class="time"></span>
+      </li>
+      <li class="step pending" data-stage="done">
+        <span class="dot" aria-hidden="true"></span>
+        <span class="name">Done</span>
+        <span class="state">pending</span>
+        <span class="time"></span>
+      </li>
+    </ol>
+    <div id="terms-box" hidden>
+      <p class="small muted">Expansion source: <strong id="expansion-src"></strong></p>
+      <ul id="chips" class="chips" aria-label="Expanded terms"></ul>
+      <p class="small muted legend"><span class="chip orig">original</span> <span class="chip added">added by LLM</span></p>
+    </div>
+    <p id="pipe-error" class="msg error" role="alert" hidden></p>
+  </section>
+
+  <section class="card" aria-labelledby="res-h">
+    <h2 id="res-h">Results</h2>
+    <p id="res-summary" class="muted small" aria-live="polite">No search yet.</p>
+    <ol id="results" class="results"></ol>
+  </section>
+
+  <section class="card" aria-labelledby="admin-h">
+    <h2 id="admin-h">Admin</h2>
+    <dl id="status" class="kv">
+      <dt>Server</dt><dd id="h-server">-</dd>
+      <dt>Ollama</dt><dd id="h-ollama">-</dd>
+      <dt>Index ready</dt><dd id="h-ready">-</dd>
+      <dt>Indexing</dt><dd id="h-indexing">-</dd>
+      <dt>Documents</dt><dd id="s-docs">-</dd>
+      <dt>Unique terms</dt><dd id="s-terms">-</dd>
+      <dt>Last build time</dt><dd id="s-time">-</dd>
+      <dt>Threads used</dt><dd id="s-threads">-</dd>
+    </dl>
+    <form id="index-form" class="row">
+      <label class="narrow">
+        <span class="lbl">Threads (1-64)</span>
+        <input id="threads" type="number" min="1" max="64" step="1" placeholder="auto">
+      </label>
+      <button id="index-btn" type="submit" class="primary">Build index</button>
+      <button id="refresh-btn" type="button">Refresh</button>
+    </form>
+    <p id="admin-msg" class="msg" role="status" hidden></p>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
