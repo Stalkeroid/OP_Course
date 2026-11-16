@@ -196,6 +196,7 @@ TEST(OllamaClientFake, HealthResultIsCachedBriefly) {
 TEST(OllamaClientFake, HealthIsThreadSafe) {
   FakeOllama fake;
   OllamaClient client(fake.url(), "llama3.2:1b", 1000);
+  EXPECT_TRUE(client.checkHealth());  // warm the cache: first check is single
   std::vector<std::thread> threads;
   std::atomic<int> trues{0};
   for (int i = 0; i < 8; ++i) {
@@ -207,4 +208,48 @@ TEST(OllamaClientFake, HealthIsThreadSafe) {
   }
   for (auto& t : threads) t.join();
   EXPECT_EQ(trues.load(), 160);
+}
+
+TEST(OllamaClientFake, HealthIsSingleFlight) {
+  FakeOllama fake;
+  fake.blockTags();
+  OllamaClient client(fake.url(), "llama3.2:1b", 5000);
+  std::atomic<bool> proberResult{false};
+  std::atomic<bool> proberDone{false};
+  std::thread prober([&] {
+    proberResult = client.checkHealth();
+    proberDone = true;
+  });
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (fake.tagsCalls() < 1 && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  ASSERT_EQ(fake.tagsCalls(), 1);
+
+  std::vector<std::thread> threads;
+  std::atomic<int> falses{0};
+  std::atomic<long> slowestUs{0};
+  for (int i = 0; i < 20; ++i) {
+    threads.emplace_back([&] {
+      const auto t0 = std::chrono::steady_clock::now();
+      if (!client.checkHealth()) falses.fetch_add(1);
+      const long us = std::chrono::duration_cast<std::chrono::microseconds>(
+                          std::chrono::steady_clock::now() - t0)
+                          .count();
+      long prev = slowestUs.load();
+      while (us > prev && !slowestUs.compare_exchange_weak(prev, us)) {
+      }
+    });
+  }
+  for (auto& t : threads) t.join();
+  EXPECT_EQ(falses.load(), 20);  // no completed check yet -> false
+  EXPECT_LT(slowestUs.load(), 500000);
+  EXPECT_FALSE(proberDone.load());
+  EXPECT_EQ(fake.tagsCalls(), 1);
+
+  fake.release();
+  prober.join();
+  EXPECT_TRUE(proberResult.load());
+  EXPECT_TRUE(client.checkHealth());  // cache updated
+  EXPECT_EQ(fake.tagsCalls(), 1);
 }

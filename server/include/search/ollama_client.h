@@ -71,6 +71,7 @@ class OllamaClient {
   int timeoutMs_;
 
   std::mutex healthMutex_;
+  bool probing_ = false;  // a probe is in flight (guarded by healthMutex_)
   bool hasHealth_ = false;
   bool healthValue_ = false;
   std::chrono::steady_clock::time_point healthAt_;

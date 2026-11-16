@@ -19,6 +19,11 @@ class FakeOllama {
   FakeOllama() {
     server_.Get("/api/tags",
                 [this](const httplib::Request&, httplib::Response& res) {
+                  tagsCalls_.fetch_add(1);
+                  {
+                    std::unique_lock<std::mutex> gate(gateMutex_);
+                    gateCv_.wait(gate, [this] { return !tagsBlocked_; });
+                  }
                   std::lock_guard<std::mutex> lock(mutex_);
                   res.set_content(tagsBody_, "application/json");
                 });
@@ -82,10 +87,17 @@ class FakeOllama {
     std::lock_guard<std::mutex> lock(gateMutex_);
     blocked_ = true;
   }
+  // Makes /api/tags block (after counting the call) until release().
+  void blockTags() {
+    std::lock_guard<std::mutex> lock(gateMutex_);
+    tagsBlocked_ = true;
+  }
+  int tagsCalls() const { return tagsCalls_.load(); }
   void release() {
     {
       std::lock_guard<std::mutex> lock(gateMutex_);
       blocked_ = false;
+      tagsBlocked_ = false;
     }
     gateCv_.notify_all();
   }
@@ -111,6 +123,8 @@ class FakeOllama {
   std::mutex gateMutex_;
   std::condition_variable gateCv_;
   bool blocked_ = false;
+  bool tagsBlocked_ = false;
+  std::atomic<int> tagsCalls_{0};
 };
 
 inline std::string FakeOllama::wrap(const std::string& modelAnswer) {

@@ -149,15 +149,20 @@ bool OllamaClient::probeHealth() const {
 }
 
 bool OllamaClient::checkHealth() {
-  const auto now = std::chrono::steady_clock::now();
   {
     std::lock_guard<std::mutex> lock(healthMutex_);
+    const auto now = std::chrono::steady_clock::now();
     if (hasHealth_ && now - healthAt_ < kHealthCacheTtl) return healthValue_;
+    // Single flight: while another thread probes, answer at once with the last
+    // known value (false before the first completed check).
+    if (probing_) return hasHealth_ && healthValue_;
+    probing_ = true;
   }
   // Probe without holding the lock: a hanging Ollama must not serialise the
   // health endpoint behind one slow request.
   const bool healthy = probeHealth();
   std::lock_guard<std::mutex> lock(healthMutex_);
+  probing_ = false;
   hasHealth_ = true;
   healthValue_ = healthy;
   healthAt_ = std::chrono::steady_clock::now();
