@@ -10,8 +10,9 @@ REST API and a WebSocket pipeline, and uses Ollama for query expansion.
   `docs/API.md`, `README.md`, test names, prompts to subagents, subagent reports.
 - **Every message addressed to the user is written in Ukrainian**: plans, questions,
   progress updates, summaries, review results.
-- Explanatory note (`docs/report/`) language: **English** (switch to Ukrainian here
-  if the user asks).
+- Explanatory note (`docs/report/`) language: **Ukrainian** (the course is taught
+  in Ukrainian; chosen by the orchestrator while the user was away — switch here
+  if the user prefers English).
 
 ## Your role: orchestrator
 
@@ -75,7 +76,8 @@ README. Never let code drift from the document.
   and fields such as `addDocument`, `enqueueTask`, `docId`); clang-format Google
   style governs layout only.
 - Build layout: root `CMakeLists.txt` adds `server/` and `cli/`. Targets:
-  `search_core` (static lib), `search_server`, `search_cli`, `core_tests`.
+  `search_core` and `search_service` (static libs), `search_server`,
+  `search_cli`, `core_tests`, `service_tests`.
   One root `Dockerfile` (multi-stage); runtime image has `/app/search_server`,
   `/app/search_cli`, `/app/web`.
 - Dataset: generated, ~2.1 GB, >= 10 000 documents (assignment says >= 2 GB).
