@@ -109,6 +109,8 @@ services:
     working_dir: /bench
     volumes:
       - ./bench:/bench
+      # run_all.py picks its query words from the generator's vocabulary.
+      - ./dataset/vocab:/dataset/vocab:ro
     environment:
       PYTHONDONTWRITEBYTECODE: "1"
       PIP_ROOT_USER_ACTION: ignore

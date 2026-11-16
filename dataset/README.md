@@ -11,7 +11,9 @@ matches the requested size/docs/seed; otherwise it wipes `DIR` and regenerates.
 
 Vocabulary: `vocab/<topic>.txt` and `vocab/general.txt` (one word per line); the
 script derives plurals, -ing/-ed/-er/-ly forms, hyphenated compounds, years and
-model codes (about 38k distinct terms). Words are drawn with a Zipf-like
+model codes (about 38k distinct word forms; the search index splits hyphenated
+compounds and drops stop words and one-letter tokens, so it reports about 16.7k
+unique terms). Words are drawn with a Zipf-like
 distribution; document sizes vary +-50% around size/docs.
 
 In Docker, the `dataset-init` compose service runs it into the `dataset` volume.

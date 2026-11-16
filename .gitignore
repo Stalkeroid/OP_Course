@@ -9,6 +9,7 @@ dataset/data/
 
 # Benchmarks temp
 bench/.venv/
+.venv/
 __pycache__/
 
 # IDE / OS

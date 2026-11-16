@@ -1,4 +1,5 @@
 """Vocabulary construction for the dataset generator (standard library only)."""
+
 import os
 import random
 
@@ -45,7 +46,7 @@ def derived_forms(word):
 def zipf_cum_weights(n, s=1.0):
     total, cum = 0.0, []
     for rank in range(1, n + 1):
-        total += 1.0 / rank ** s
+        total += 1.0 / rank**s
         cum.append(total)
     return cum
 
@@ -60,7 +61,9 @@ def build_topic_pool(base, rng, compounds=1500):
         if a != b:
             pool.append(a + "-" + b)
     for _ in range(compounds // 3):
-        pool.append("model %s%d" % (rng.choice("abcdefghjkmnpqrstuvwxyz"), rng.randint(10, 999)))
+        pool.append(
+            "model %s%d" % (rng.choice("abcdefghjkmnpqrstuvwxyz"), rng.randint(10, 999))
+        )
     pool.extend(str(y) for y in range(1950, 2031))
     return list(dict.fromkeys(pool))
 

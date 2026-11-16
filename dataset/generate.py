@@ -4,6 +4,7 @@
 Usage: python3 dataset/generate.py --out DIR --size-mb N --docs M --seed S
 Layout: DIR/<topic>/doc_NNNNNN.txt, plus DIR/.complete (written last).
 """
+
 import argparse
 import json
 import multiprocessing as mp
@@ -17,10 +18,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import vocab  # noqa: E402
 
 MARKER = ".complete"
-TOPIC_SHARE = 0.60    # words drawn from the document's own topic
+TOPIC_SHARE = 0.60  # words drawn from the document's own topic
 GENERAL_SHARE = 0.34  # shared everyday words
-CROSS_SHARE = 0.06    # words from any topic (cross-topic overlap)
-OVERHEAD = 1.12       # bytes per word beyond word length + space (punctuation, newlines)
+CROSS_SHARE = 0.06  # words from any topic (cross-topic overlap)
+OVERHEAD = 1.12  # bytes per word beyond word length + space (punctuation, newlines)
 
 _state = {}
 
@@ -36,7 +37,11 @@ def init_worker(seed):
     for t in topics:
         own = vocab.build_topic_pool(bases[t], rng)
         words, weights = [], []
-        for part, share in ((own, TOPIC_SHARE), (general, GENERAL_SHARE), (cross, CROSS_SHARE)):
+        for part, share in (
+            (own, TOPIC_SHARE),
+            (general, GENERAL_SHARE),
+            (cross, CROSS_SHARE),
+        ):
             cum = vocab.zipf_cum_weights(len(part))
             total = cum[-1]
             prev = 0.0
@@ -48,7 +53,9 @@ def init_worker(seed):
         for x in weights:
             acc += x
             cum_w.append(acc)
-        avg = sum(len(w) * x for w, x in zip(words, weights)) / acc + 1.0 + OVERHEAD - 1.0
+        avg = (
+            sum(len(w) * x for w, x in zip(words, weights)) / acc + 1.0 + OVERHEAD - 1.0
+        )
         pools[t] = (words, cum_w, avg)
     _state.update(topics=topics, pools=pools, seed=seed)
 
@@ -114,8 +121,11 @@ def main():
     ap.add_argument("--docs", type=int, default=20000)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--workers", type=int, default=os.cpu_count() or 1)
-    ap.add_argument("--if-needed", action="store_true",
-                    help="exit immediately when the marker matches size/docs/seed")
+    ap.add_argument(
+        "--if-needed",
+        action="store_true",
+        help="exit immediately when the marker matches size/docs/seed",
+    )
     a = ap.parse_args()
     if a.size_mb < 1 or a.docs < 1:
         ap.error("--size-mb and --docs must be positive")
@@ -128,23 +138,33 @@ def main():
         os.makedirs(os.path.join(a.out, t), exist_ok=True)
     mean_bytes = a.size_mb * 1024 * 1024 / a.docs
     step = 50
-    jobs = [(a.out, lo, min(a.docs, lo + step), mean_bytes, a.seed)
-            for lo in range(0, a.docs, step)]
+    jobs = [
+        (a.out, lo, min(a.docs, lo + step), mean_bytes, a.seed)
+        for lo in range(0, a.docs, step)
+    ]
     t0 = time.time()
     done_docs = done_bytes = 0
     with mp.Pool(a.workers, initializer=init_worker, initargs=(a.seed,)) as pool:
         for d, b in pool.imap_unordered(write_chunk, jobs):
             done_docs += d
             done_bytes += b
-            print("\r%d/%d docs, %.0f MB" % (done_docs, a.docs, done_bytes / 1e6),
-                  end="", file=sys.stderr, flush=True)
+            print(
+                "\r%d/%d docs, %.0f MB" % (done_docs, a.docs, done_bytes / 1e6),
+                end="",
+                file=sys.stderr,
+                flush=True,
+            )
     secs = time.time() - t0
     print(file=sys.stderr)
     with open(os.path.join(a.out, MARKER), "w", encoding="utf-8") as fh:
-        json.dump({"size_mb": a.size_mb, "docs": a.docs, "seed": a.seed,
-                   "bytes": done_bytes}, fh)
-    print("done: %d docs, %.1f MB in %.1f s (%.1f MB/s)"
-          % (done_docs, done_bytes / 1e6, secs, done_bytes / 1e6 / max(secs, 1e-9)))
+        json.dump(
+            {"size_mb": a.size_mb, "docs": a.docs, "seed": a.seed, "bytes": done_bytes},
+            fh,
+        )
+    print(
+        "done: %d docs, %.1f MB in %.1f s (%.1f MB/s)"
+        % (done_docs, done_bytes / 1e6, secs, done_bytes / 1e6 / max(secs, 1e-9))
+    )
     return 0
 
 
