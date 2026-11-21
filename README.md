@@ -9,9 +9,8 @@ plain query when Ollama is not available.
 
 Everything starts with one command: `docker compose up`.
 
-The contract of every endpoint and message is [`docs/API.md`](docs/API.md). UML
-diagrams are in [`docs/uml/`](docs/uml/README.md), the explanatory note is in
-[`docs/report/`](docs/report/).
+The contract of every endpoint and message is [`docs/API.md`](docs/API.md). The UML
+diagrams and the explanatory note are submitted as a separate document.
 
 ## Architecture
 
@@ -449,7 +448,7 @@ cache; the benchmark therefore does one untimed warm-up build before the timed o
 The `bench` service mounts `./bench` and, read-only, `./dataset/vocab` (the query words
 are drawn from the generator vocabulary).
 Options, a host-Python variant and method notes: [`bench/README.md`](bench/README.md);
-bottleneck discussion: [`bench/ANALYSIS.md`](bench/ANALYSIS.md).
+the bottleneck analysis is in the explanatory note.
 
 ## Project structure
 
@@ -468,8 +467,6 @@ web/                      static Web UI (index.html, app.js, style.css)
 dataset/                  generate.py, vocab.py, vocab/*.txt (data lives in a Docker volume)
 bench/                    run_all.py, loadgen.py, plot.py, report.py, results/, charts/
 docs/API.md               REST + WebSocket contract
-docs/uml/                 PNG diagrams + README.md with Mermaid diagrams
-docs/report/              explanatory note (Ukrainian) and PDF instructions
 docs/prompts.md           log of the AI prompts used during development
 docs/assignment/          the task description (PDF)
 ```

@@ -2,8 +2,8 @@
 
 Scalability measurements of the search engine: index build time vs threads,
 speedup / efficiency, search throughput vs concurrent clients (keyword-only and
-with LLM query expansion), and a 10-query result-quality table. The qualitative
-bottleneck discussion is in [ANALYSIS.md](ANALYSIS.md).
+with LLM query expansion), and a 10-query result-quality table. The bottleneck
+analysis is in the explanatory note.
 
 ## Prerequisites
 

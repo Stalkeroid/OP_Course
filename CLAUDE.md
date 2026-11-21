@@ -10,7 +10,7 @@ REST API and a WebSocket pipeline, and uses Ollama for query expansion.
   `docs/API.md`, `README.md`, test names, prompts to subagents, subagent reports.
 - **Every message addressed to the user is written in Ukrainian**: plans, questions,
   progress updates, summaries, review results.
-- Explanatory note (`docs/report/`) language: **Ukrainian** (the course is taught
+- Explanatory note (separate document, not in the repository) language: **Ukrainian** (the course is taught
   in Ukrainian; chosen by the orchestrator while the user was away — switch here
   if the user prefers English).
 
@@ -72,7 +72,7 @@ README. Never let code drift from the document.
 - Formatting: `.clang-format` with `BasedOnStyle: Google`; all C++ is formatted
   before commit. Python helper scripts: `black`.
 - CMake option `ENABLE_TSAN` builds tests with ThreadSanitizer.
-- Naming follows the UML diagrams in `docs/uml/` (class names, camelCase methods
+- Naming follows the UML class diagram (class names, camelCase methods
   and fields such as `addDocument`, `enqueueTask`, `docId`); clang-format Google
   style governs layout only.
 - Build layout: root `CMakeLists.txt` adds `server/` and `cli/`. Targets:
@@ -95,7 +95,7 @@ cli/           CLI client sources
 web/           static Web UI (served by the server)
 dataset/       generator script only; data lives in a Docker volume, git-ignored
 bench/         benchmark scripts, raw results (csv), charts (png)
-docs/          API.md, prompts.md, uml/, report/, assignment/ (task PDF)
+docs/          API.md, prompts.md, assignment/ (task PDF)
 docker-compose.yml
 search         CLI entry script at repo root: ./search "query"
 README.md

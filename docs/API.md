@@ -41,7 +41,7 @@ behaviours: wherever the assignment is silent, this document fixes one rule.
 
 Endpoints:
 
-| Method | Path | Purpose | Server component (see `docs/uml/class-diagram.png`) |
+| Method | Path | Purpose | Server component (class diagram) |
 |---|---|---|---|
 | `GET` | `/api/health` | Liveness + Ollama availability | `ApiServer::handleHealthCheck` → `OllamaClient::checkHealth` |
 | `POST` | `/api/index` | (Re)build the inverted index in parallel | `ApiServer::handleIndexPost` → `SearchPipelineService::buildIndex` |
@@ -695,7 +695,7 @@ curl -s http://localhost:8080/api/stats
 ## 10. WebSocket /ws/search
 
 Streams the pipeline stages of a search, one JSON text message per stage
-(sequence diagram `docs/uml/sequence-streaming-search.png`).
+(sequence diagram "streaming search").
 
 ### 10.1 Connection lifetime
 
