@@ -1,0 +1,60 @@
+{
+  "timestamp": "2026-11-21T10:31:09+0000",
+  "server": "server:8080",
+  "health": {
+    "index_ready": true,
+    "indexing": false,
+    "ollama": true,
+    "status": "ok"
+  },
+  "stats_at_start": {
+    "documents": 20000,
+    "index_build_time_ms": 1582,
+    "index_ready": true,
+    "indexing": false,
+    "threads_used": 12,
+    "unique_terms": 16656
+  },
+  "client_cpu_count": 12,
+  "client_platform": "Linux-6.18.58.1-microsoft-standard-WSL2-x86_64-with-glibc2.41",
+  "python": "3.12.16",
+  "parameters": {
+    "host": "server",
+    "port": 8080,
+    "quick": false,
+    "out": "/bench/results",
+    "charts": null,
+    "threads": [
+      1,
+      2,
+      3,
+      4,
+      6,
+      8,
+      12,
+      16
+    ],
+    "clients": [
+      1,
+      2,
+      4,
+      8,
+      16,
+      32,
+      64
+    ],
+    "llm_clients": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "repeats": 3,
+    "duration": 15,
+    "skip_index": false,
+    "skip_load": false,
+    "skip_llm": false,
+    "warmup": 2.0
+  },
+  "to_fill_by_hand": "CPU model, physical cores/threads, RAM, OS, Docker CPU/memory limits (see bench/README.md)"
+}

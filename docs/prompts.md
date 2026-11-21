@@ -1756,3 +1756,89 @@ anything you found wrong in addition and fixed; anything you could not verify.
 ```
 
 Outcome: accepted (six inaccurate claims corrected; Mermaid diagrams were not re-rendered after the edit)
+
+### 22. docs-writer — fill the note with the local benchmark results
+Date: 2026-11-21
+Model: sonnet
+Prompt:
+
+```
+Repository: /home/claude/op_course. Your role file was loaded as your system
+prompt. The explanatory note docs/report/explanatory-note.md is Ukrainian;
+bench/ANALYSIS.md is English. Do not edit code, docs/API.md or docs/prompts.md.
+
+The student ran the full benchmark on their own machine. Its outputs are now in
+the repository and are the ONLY source for measured numbers:
+- bench/results/REPORT.md (computed tables: build time vs threads with
+  S(p), E(p), Karp-Flatt; keyword and LLM throughput; load-generator ceiling;
+  search quality), bench/results/*.csv, bench/results/environment.json;
+- bench/results/hardware.md (machine description written by hand);
+- bench/charts/index_time_vs_threads.png, speedup_efficiency.png,
+  throughput_vs_clients.png, latency_vs_clients.png.
+Read all of them before writing. Copy numbers exactly as they appear there
+(round only where the note says "about"); compute nothing that REPORT.md does
+not already give, except simple ratios you state as such.
+
+TASK 1 — replace every «[ЗАПОВНИТИ …]» placeholder in sections 4 and 5 of the
+note with real content:
+- 4.x environment: from hardware.md.
+- index build: embed the two charts with Markdown image links relative to the
+  note (../../bench/charts/<file>.png), a table of p, mean T(p), std, S(p),
+  E(p), e(p) from REPORT.md, and a short interpretation: near-linear up to the
+  6 physical cores (E >= 0.93), drop past 6 because threads 7-12 are SMT
+  siblings sharing an core's execution units and caches, best at 12 threads
+  (8.52x), slower at 16 (oversubscription: more runnable threads than logical
+  CPUs, context switches). Karp-Flatt e rises from about 0.01 to 0.067: a
+  rising e points to growing overhead (shared memory/cache bandwidth, SMT,
+  scheduling), not to a fixed serial part; tie this to the design (per-thread
+  term counting without locks, 64 shards, the coordinating thread only walks
+  the directory).
+- throughput: embed throughput_vs_clients.png and latency_vs_clients.png, a
+  table of the keyword-only levels, saturation at 16 clients (~17.7k req/s,
+  peak 18.0k at 64) with p50 latency growing from 0.44 to 3.04 ms (queueing
+  once the CPU is saturated); the load generator ran on the same CPU (ceiling
+  check 46.5k req/s on /api/health, so it was not the limit, but it competed
+  for cores — say so as a limitation).
+- LLM: throughput flat at 0.63-0.77 req/s for 1-8 clients while p50 latency
+  grows roughly linearly (1.0 s, 2.0 s, 3.9 s, 8.0 s): the single Ollama
+  instance serves generations one after another, so the model is the
+  bottleneck and adding server threads cannot help; at 8 clients 2 of 23
+  responses hit the 15 s timeout and fell back (the fallback design working
+  as intended); keyword search is 3 500-18 800x faster. Improvement ideas:
+  GPU inference, several model instances, caching expansions of repeated
+  queries.
+- search quality: the table from search_quality.md (query, expected topic,
+  top results, PASS), 10 of 10 passed.
+- section 4.7 bottleneck analysis: fill its placeholder with the conclusions
+  above; keep the existing subsection on limitation L1 and the rejected
+  request-pool design as it is.
+- section 5 conclusions: fill every placeholder with the measured values.
+- The placeholder about running the tests and the TSAN build on the student's
+  machine: the student did not run them locally. Replace it with the results
+  from development (134 tests, 0 ThreadSanitizer warnings in both suites,
+  verified independently from a fresh clone), clearly labelled as obtained in
+  the development environment (Linux, 2 cores), not on the benchmark machine.
+- The optional memory placeholder in section 3.3: remove the bracket, keep the
+  development-time figures already stated.
+- The repository link placeholder: https://github.com/Stalkeroid/OP_Course
+- KEEP these placeholders, the student fills them: author name and group;
+  inserting UML pictures into the PDF.
+Remove the remark that the benchmark numbers are still missing wherever the
+note says so (e.g. intro of section 4, docs/report/README.md checklist).
+
+TASK 2 — bench/ANALYSIS.md: add a short section "Results of the 2026-11-21
+run" that links REPORT.md and the charts and states which of the hypotheses
+in the file the data confirmed (SMT knee, oversubscription past 12, CPU
+saturation of keyword search at 16 clients, LLM serialisation) and which it
+could not decide. Fix the opening statement about measured numbers so it
+stays true.
+
+TASK 3 — docs/report/README.md: update the checklist (benchmark done; what
+remains: name/group, UML pictures, PDF export, submission).
+
+Do NOT run git add / git commit / git push.
+REPORT BACK (concise, English): placeholders replaced (count) and those left
+on purpose; any number you could not find in the bench files.
+```
+
+Outcome: accepted (17 placeholders filled from bench/results; author name/group and UML pictures left for the student)

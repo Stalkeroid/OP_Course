@@ -1,0 +1,2 @@
+clients,requests,errors,duration_s,throughput_rps,p50_ms,p95_ms,p99_ms,mean_server_time_ms,expansion_llm,expansion_fallback,expansion_disabled,client_cpu_pct,label
+64,697637,0,15,46509.13,1.17,3.09,4.24,,0,0,0,631.5,health

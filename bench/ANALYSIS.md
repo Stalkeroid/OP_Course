@@ -1,10 +1,51 @@
 # Bottleneck analysis (draft)
 
-This file explains the shape of the curves qualitatively. It contains no
-results of the coursework benchmark on purpose (one development-time figure is
-quoted in section 5 and labelled as such): all benchmark numbers are in `results/REPORT.md` and the
-charts in `charts/`. Passages marked **[TO COMPLETE]** must be filled in by the
-student after the local run, together with the hardware description.
+This file explains the shape of the curves qualitatively. The benchmark numbers
+of the coursework run (2026-11-21) are in `results/REPORT.md` and the charts in
+`charts/`; they are not repeated here except in the summary below. One
+development-time figure is quoted in section 5 and labelled as such. Passages
+marked **[TO COMPLETE]** were written before the run; the section "Results of
+the 2026-11-21 run" answers them.
+
+## Results of the 2026-11-21 run
+
+Data: [`results/REPORT.md`](results/REPORT.md), `results/*.csv`,
+[`results/hardware.md`](results/hardware.md) (AMD Ryzen 5 7500F, 6 cores / 12
+threads, Docker Desktop on WSL 2, Ollama on CPU). Charts:
+[`charts/index_time_vs_threads.png`](charts/index_time_vs_threads.png),
+[`charts/speedup_efficiency.png`](charts/speedup_efficiency.png),
+[`charts/throughput_vs_clients.png`](charts/throughput_vs_clients.png),
+[`charts/latency_vs_clients.png`](charts/latency_vs_clients.png).
+
+Confirmed by the data:
+
+- **SMT knee (cause 5).** E(p) is 0.93 at p = 6 (the physical core count) and
+  falls to 0.83 at 8 and 0.71 at 12; the speedup is 5.56x, 6.64x and 8.52x.
+- **Oversubscription past 12 (cause 5).** 16 threads take 1627 ms against
+  1519 ms for 12 (7.95x against 8.52x); E(16) = 0.50.
+- **Overhead, not a fixed serial part.** Karp-Flatt e rises from about 0.01 (p = 2..4)
+  to 0.067 (p = 16) instead of staying constant.
+- **CPU saturation of keyword search.** Throughput reaches 17.7k req/s at 16
+  clients (95% of the 18.0k peak at 64) while p50 grows from 0.44 to 3.04 ms.
+  The load generator shared the CPU, but the ceiling check on `/api/health`
+  reached 46.5k req/s, so the generator was not the limit.
+- **LLM serialisation.** Throughput with expansion is flat (0.63-0.77 req/s for
+  1-8 clients) and p50 grows roughly linearly (1.0, 2.0, 3.9, 8.0 s); at 8
+  clients 2 of 23 responses hit the timeout and fell back.
+
+Not decided by the data:
+
+- The separate shares of memory bandwidth, shard lock contention (cause 4) and
+  SMT in the growth of e(p): they all predict a rising e(p), and no profiling
+  or counters were recorded.
+- Disk and page cache (cause 2), Docker CPU limit (cause 6; all 12 logical CPUs
+  were visible, so it is not a limit here) and task granularity (cause 7).
+- Whether snippet file reads dominate the per-request cost of keyword search
+  (section 3, cause 2): the run does not separate them from JSON and scoring
+  (`mean server time_ms` is 0.0-0.09 ms).
+- Why Ollama serialises (one model on CPU or its parallelism setting): the
+  flat throughput shows that it does, not why.
+
 
 ## 1. What is being measured
 
@@ -94,7 +135,7 @@ Candidate causes in this implementation, with the evidence to look for in
    pool's queue lock; with very small documents this queue is a contention point
    at high p.
 
-**[TO COMPLETE after the local run]**: state at which thread count the speedup
+**[TO COMPLETE after the local run]** (answered in "Results of the 2026-11-21 run"): state at which thread count the speedup
 flattens, the Karp-Flatt trend (constant or growing), the physical vs logical
 core count of the laptop, and which of causes 1-7 the evidence supports. Do not
 claim a cause without pointing at a table row or a chart.
@@ -156,7 +197,7 @@ labels (`llm` vs `fallback` counts) show whether the LLM was really in the path.
 On a laptop without GPU a 1B-parameter model also competes with the server for
 the same CPU cores.
 
-**[TO COMPLETE after the local run]**: peak keyword-only throughput and the
+**[TO COMPLETE after the local run]** (answered in "Results of the 2026-11-21 run"): peak keyword-only throughput and the
 client count where it saturates, the keyword/LLM ratio, and whether the LLM was
 CPU-bound on the same cores as the server.
 

@@ -1,0 +1,5 @@
+clients,requests,errors,duration_s,throughput_rps,p50_ms,p95_ms,p99_ms,mean_server_time_ms,expansion_llm,expansion_fallback,expansion_disabled,client_cpu_pct,label
+1,19,0,30,0.63,1001.01,1375.05,3045.44,1121.05,19,0,0,0.0,ollama-ready
+2,22,0,30,0.73,1968.51,2123.85,2208.41,1965.59,22,0,0,0.0,ollama-ready
+4,19,0,30,0.63,3862.31,4114.87,4164.71,3903.47,19,0,0,0.1,ollama-ready
+8,23,0,30,0.77,7997.71,15004.38,15015.18,9936.61,21,2,0,0.1,ollama-ready
