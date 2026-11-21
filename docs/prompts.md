@@ -1842,3 +1842,68 @@ on purpose; any number you could not find in the bench files.
 ```
 
 Outcome: accepted (17 placeholders filled from bench/results; author name/group and UML pictures left for the student)
+
+### 23. docs-writer — UML section of the note as finished figures
+Date: 2026-11-21
+Model: sonnet
+Prompt:
+
+```
+Repository: /home/claude/op_course. Your role file was loaded as your system
+prompt. The explanatory note docs/report/explanatory-note.md is Ukrainian.
+Do not edit code, docs/API.md, docs/prompts.md or docs/uml/README.md.
+
+DECISION OF THE STUDENT (binding): the three hand-drawn diagrams in docs/uml/
+(class-diagram.png, use-case-diagram.png, sequence-streaming-search.png) are
+the project's class, use-case and streaming-search sequence diagrams. They
+will not be redrawn, and the note must NOT describe them as preliminary,
+outdated, incomplete or different from the code: no "до реалізації",
+"початковий проєкт", "відмінності", "не оновлені", no suggestion to add an
+<<include>>, no pointer to the "PNG vs code" table.
+
+TASK 1 — render the remaining diagrams to images so the note is complete
+without manual export. Use mmdc (/home/claude/.npm-global/bin/mmdc; a
+puppeteer config with "args":["--no-sandbox"] may be needed) to render these
+Mermaid blocks from docs/uml/README.md to PNG with a white background, width
+about 1600 px, into docs/uml/:
+- section 3 deployment diagram -> deployment-diagram.png
+- section 4.2 keyword search (REST) -> sequence-keyword-search.png
+- section 4.3 build the index -> sequence-build-index.png
+- section 4.4 view index statistics -> sequence-index-stats.png
+- section 4.5 check service health -> sequence-health-check.png
+Do not render the section 2.2 class diagram. Open every PNG with the Read
+tool and confirm it rendered completely and legibly (no syntax-error image,
+no clipped labels); fix the rendering parameters if needed (do not change the
+diagram source).
+
+TASK 2 — rewrite section 2 "Модель системи" of the note as a finished model
+chapter:
+- 2.1 use case: embed ../uml/use-case-diagram.png as a numbered figure
+  («Рисунок 2.1 — Діаграма варіантів використання») and describe the actors
+  and use cases as drawn, mapping each use case to its endpoint.
+- 2.2 class: embed ../uml/class-diagram.png (Рисунок 2.2) and describe the
+  classes, their responsibilities and relations as drawn (composition of
+  SearchPipelineService with OllamaClient, CustomThreadPool, InvertedIndex;
+  DTOs SearchResult and IndexStats). Where it helps the reader, you may say in
+  one sentence that the implementation adds helper classes (IndexBuilder,
+  Config, WebSocketSession) — as an addition, not as a discrepancy.
+- 2.3 sequence diagrams, one per use case, each a numbered figure with two or
+  three sentences explaining the flow: streaming search (the PNG), keyword
+  search, build index, index statistics, health check (the rendered PNGs).
+- 2.4 deployment: the rendered deployment PNG as a figure plus the existing
+  description of the compose services.
+Remove the «[ЗАПОВНИТИ: вставити в PDF рисунки …]» placeholder: the pictures
+are now embedded. Search the whole note for any other sentence that calls the
+PNG diagrams preliminary or outdated and rephrase or remove it.
+
+TASK 3 — docs/report/README.md: drop the steps about exporting Mermaid
+diagrams and redrawing PNGs; the only remaining placeholder is author name and
+group; keep the PDF export instructions (images are linked relatively, so
+export from docs/report).
+
+Do NOT run git add / git commit / git push.
+REPORT BACK (concise, English): files created/changed, figure list with file
+names, and confirmation that you viewed each rendered image.
+```
+
+Outcome: accepted (8 figures embedded in section 2; five diagrams rendered from Mermaid and checked visually; only the author name and group remain to fill)

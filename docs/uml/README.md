@@ -477,7 +477,7 @@ sequenceDiagram
       else success
         Bld->>Idx: setBuildInfo(timeMs, threads, filesSkipped)
         Bld-->>Svc: BuildOutcome(index, stats)
-        Svc->>Svc: old = servedIndex_; servedIndex_ = new index (swap under indexMutex_)
+        Svc->>Svc: old = servedIndex_, servedIndex_ = new index (swap under indexMutex_)
         Note over Svc: searches that started earlier finish on the old index
         Svc->>Svc: old.reset() after the mutex is released
         Note over Svc: the last owner destroys the old index: slabs munmap-ed,<br/>HeapTrimGuard calls releaseFreeHeapMemory()
