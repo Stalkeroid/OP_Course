@@ -95,7 +95,7 @@ cli/           CLI client sources
 web/           static Web UI (served by the server)
 dataset/       generator script only; data lives in a Docker volume, git-ignored
 bench/         benchmark scripts, raw results (csv), charts (png)
-docs/          API.md, prompts.md, assignment/ (task PDF)
+docs/          API.md, GUIDE.md, prompts.md, assignment/ (task PDF)
 docker-compose.yml
 search         CLI entry script at repo root: ./search "query"
 README.md

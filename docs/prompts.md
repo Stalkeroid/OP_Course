@@ -1907,3 +1907,31 @@ names, and confirmation that you viewed each rendered image.
 ```
 
 Outcome: accepted (8 figures embedded in section 2; five diagrams rendered from Mermaid and checked visually; only the author name and group remain to fill)
+
+### 24. docs-writer — short README with API field types, details to GUIDE
+Date: 2026-11-21
+Prompt:
+Repository: /home/claude/op_course (C++20 parallel search engine coursework). Work in English. Do not run git commit (the orchestrator commits). Do not edit code, docs/API.md, docs/prompts.md or CLAUDE.md.
+
+GOAL
+The student wants README.md to give only the basic information a grader needs, and everything else moved into a separate guide. The grader's checklist for README is: how to run the system; dataset path and format; CLI usage; and a clear description of the API — every endpoint and every WebSocket message with request/response formats, i.e. paths, field NAMES AND TYPES. Today README.md (~500 lines) gives endpoint paths and curl examples but no field types (types live only in docs/API.md). Fix both problems.
+
+DELIVERABLE 1 — docs/GUIDE.md (new file)
+Move into it, essentially verbatim (light edits only to make headings flow), every README section that is not basic info: Architecture, Requirements details beyond one line, First steps beyond the minimum, Known limitations, dataset generator details / variables / smaller dataset / using your own corpus, Web UI details, Configuration (env vars), Development (local build, tests, TSAN, index_bench), Benchmarks, Project structure, Troubleshooting, and any other detail. Nothing that is in README.md today may be lost: every fact must end up either in the new README.md or in docs/GUIDE.md. Fix relative links that break because the file moved into docs/ (e.g. `docs/API.md` becomes `API.md`, `bench/README.md` becomes `../bench/README.md`).
+
+DELIVERABLE 2 — README.md rewritten, short (target 120–170 lines including tables and code blocks), sections in this order:
+1. Title + 2–3 sentence description (what the system does: parallel inverted index built by a custom thread pool, keyword search, Ollama query expansion, REST + WebSocket, CLI and Web UI).
+2. Quick start: prerequisites in one line (Docker with Compose v2), `git clone` + `docker compose up`, what starts (server, ollama as a separate service, one-shot model and dataset init), where the Web UI is (http://localhost:8080), and the first two actions: build the index (`./search --index N` or curl) and search (`./search "query"`). Mention that search before the first index build returns 503.
+3. Dataset: path in the container, volume, file format (one UTF-8 .txt per document, `<topic>/doc_NNNNNN.txt`), doc_id format, default size (20 000 documents, 2100 MiB ≈ 2.2 GB), generated automatically on first start; one line linking to docs/GUIDE.md for generator options and own corpus.
+4. CLI: `./search "query"` (and `search.cmd` on Windows), the flags table (take the flags and their meaning from the current README CLI section / cli/src/main.cpp: --index N, --stats, --health, --limit, --no-expand, --json, --host, --port, --timeout, --help), one sample output block shortened from the current README.
+5. API: one overview table (method, path, purpose), then for EACH endpoint a compact table of request fields and response fields with columns `Field | Type | Notes` (JSON types: string, integer, number, boolean, array<…>, object), then the SearchResult object, the error object and HTTP status codes in one compact table (code → status), then the WebSocket: client message fields table, and one table per server message (query_expansion, keyword_search, done, error) with stage/data fields and types, plus the ordering rule (query_expansion → keyword_search → done, or error; connection stays open). Take every field, type, constraint and default EXACTLY from docs/API.md (sections 3, 6–10, 13); do not invent or rename anything. Keep the existing short curl/websocat examples only if they still fit the length budget (one example each at most). End with: "Full contract with every rule: docs/API.md".
+6. More: one short list of links — docs/GUIDE.md (architecture, configuration, development, benchmarks, troubleshooting), docs/API.md, bench/README.md, bench/charts and bench/results (measurements). Do not add a bottleneck-analysis section.
+
+ACCEPTANCE
+- README.md 120–170 lines; contains run instructions, dataset path+format, CLI usage, and field-name+type tables for all 4 REST endpoints, the error shape and all WebSocket messages.
+- Every type/field/default in README matches docs/API.md (check field by field).
+- docs/GUIDE.md contains everything removed from README; no broken relative links in either file (check each link target exists).
+- No claims about numbers or behaviour that are not already in the current README or docs/API.md.
+
+REPORT BACK: README line count; list of README sections; list of GUIDE.md sections; confirmation of the field-by-field check against docs/API.md (list any place where the old README disagreed with docs/API.md); any link you had to fix.
+Outcome: accepted (README 169 lines with field/type tables matching docs/API.md; details moved to docs/GUIDE.md; the orchestrator replaced the clone URL placeholder)
